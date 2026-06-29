@@ -16,6 +16,10 @@ inputs:
     description: "Quality 1-100 for lossy encoders (implies lossy)."
     required: false
     default: ""
+  min-savings:
+    description: "Only rewrite a file if it shrinks by at least this percent. Empty = imageopt default (0 lossless, 10 with lossy so repeated runs converge)."
+    required: false
+    default: ""
   recursive:
     description: "Recurse into subdirectories (true/false)."
     required: false
@@ -61,6 +65,7 @@ runs:
         IO_EXTRA: ${{ inputs.extra-args }}
         IO_LOSSY: ${{ inputs.lossy }}
         IO_QUALITY: ${{ inputs.quality }}
+        IO_MIN: ${{ inputs.min-savings }}
         IO_RECURSIVE: ${{ inputs.recursive }}
         IO_STRIP: ${{ inputs.strip }}
         IO_CHECK: ${{ inputs.check }}
@@ -108,6 +113,7 @@ runs:
         args=()
         [ "$IO_LOSSY" = "true" ] && args+=(--lossy)
         [ -n "$IO_QUALITY" ] && args+=(--quality "$IO_QUALITY")
+        [ -n "$IO_MIN" ] && args+=(--min-savings "$IO_MIN")
         [ "$IO_RECURSIVE" = "true" ] && args+=(--recursive)
         [ "$IO_CHECK" = "true" ] && args+=(--check)
         [ "$IO_DRYRUN" = "true" ] && args+=(--dry-run)

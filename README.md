@@ -101,6 +101,7 @@ imageopt --json assets/ > report.json
 | `--lossy` | Allow lossy recompression. |
 | `-q, --quality <1-100>` | Quality for lossy encoders (implies `--lossy`). |
 | `--png-level <0-6>` | oxipng effort; 6 enables Zopfli (slowest). Default 3. |
+| `--min-savings <PERCENT>` | Only rewrite a file if it shrinks by at least this much. Default 0 (lossless) / 10 (`--lossy`); see the idempotency note. |
 | `--strip <all\|color\|none>` | Metadata: strip all, keep ICC color profile, or keep everything. Default: keep the color profile — but with `--lossy` the default becomes `all` (see note). |
 | `--dry-run` | Report what would change without modifying files. |
 | `--backup` | Copy each original to `<name>.orig` before overwriting. |
@@ -119,6 +120,20 @@ By default `imageopt` **optimizes files in place** (writes are atomic). Use
 > with `--lossy`, the metadata policy is honored and those files fall back to
 > lossless optimization (the lossy candidate is skipped). SVG `--lossy` only
 > reduces coordinate precision and is unaffected.
+
+### Idempotency (safe to re-run)
+
+**Lossless optimization is deterministic and idempotent**: the transforms are
+exact, and a candidate is only written if it's *strictly smaller* than the
+current file, so the second run on the same files finds nothing to do (`already
+optimal`) and never rewrites or degrades them. Safe to run on every CI push.
+
+**Lossy** re-encoding, by contrast, can shave a sliver on *every* run, which
+would slowly degrade an image across repeated runs. To prevent that, `--lossy`
+defaults `--min-savings` to **10%**: after the first pass, re-encoding no longer
+clears the threshold, so the file is left untouched — lossy becomes effectively
+idempotent (it converges after one pass). Pass `--min-savings 0` to squeeze every
+last byte, but don't do that in a repeated commit-back workflow.
 
 ### Exit codes
 
@@ -157,7 +172,7 @@ This repo ships a composite action (Linux/macOS runners).
     check: "true"
 ```
 
-Action inputs: `paths` (required), `lossy`, `quality`, `recursive`, `strip`,
+Action inputs: `paths` (required), `lossy`, `quality`, `min-savings`, `recursive`, `strip`,
 `check`, `dry-run`, `json`, `version`, `extra-args`.
 
 You can also just download the binary in any workflow and run it directly — see

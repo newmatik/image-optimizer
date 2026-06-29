@@ -37,6 +37,12 @@ pub struct OptimizeOptions {
     /// Reject images whose pixel count exceeds this limit (decompression-bomb
     /// guard). Default ~268 megapixels (16384×16384).
     pub max_pixels: u64,
+    /// Minimum percentage of the original size that must be saved for a
+    /// re-encode to be kept. `0.0` keeps any improvement. A non-zero value makes
+    /// repeated runs converge: it stops the tiny generational re-optimizations
+    /// that would otherwise let lossy re-encoders slowly degrade an image across
+    /// runs (e.g. in a CI commit-back loop). See [`crate::engine::optimize_bytes`].
+    pub min_savings_percent: f64,
 }
 
 impl Default for OptimizeOptions {
@@ -48,6 +54,7 @@ impl Default for OptimizeOptions {
             metadata: MetadataPolicy::default(),
             keep_larger: false,
             max_pixels: 16_384 * 16_384,
+            min_savings_percent: 0.0,
         }
     }
 }
