@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/newmatik/image-optimizer"
+homepage = "https://github.com/newmatik/image-optimizer"
+authors = ["Newmatik"]
+description = "Cross-platform, all-in-one image optimizer (ImageOptim-style) — CLI"
+
+[workspace.dependencies]
+imageopt-core = { path = "crates/core", version = "0.1.0" }
+
+# --- codecs ---
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+oxipng = { version = "10", default-features = false, features = ["parallel", "zopfli"] }
+mozjpeg = "0.10"
+mozjpeg-sys = "2.2"
+libc = "0.2"
+imagequant = "4"
+webp = "0.3"
+# GIF: the `gifsicle` crate only exposes the CLI `gifsicle_main`, which is not
+# safe to call concurrently (global state, exit()). We use the thread-safe
+# pure-Rust `gif` crate (lossless) + `imagequant` (lossy) instead.
+gif = "0.14"
+usvg = "0.47"
+rgb = "0.8"
+
+# --- engine support ---
+rayon = "1"
+
+# --- cli ---
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+walkdir = "2"
+globset = "0.4"
+indicatif = "0.18"
+owo-colors = "4"
+anstream = "0.6"
+
+# --- shared ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+# NOTE: panic must stay "unwind" (the default). The mozjpeg / libjpeg-turbo
+# bindings report errors by unwinding across the C-unwind boundary
+# (resume_unwind), which we convert to a recoverable error via catch_unwind in
+# the engine. panic = "abort" would turn a malformed-image error into a hard
+# process abort, defeating the engine's reliability guarantees.
