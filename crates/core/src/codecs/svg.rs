@@ -2,9 +2,12 @@
 //!
 //! `usvg` parses the SVG into a normalized tree (resolving `<use>`, collapsing
 //! transforms, dropping editor cruft and unused defs) and serializes it back
-//! compactly. Text is preserved as text (`preserve_text`), and in lossless mode
-//! full coordinate precision is kept; `--lossy` reduces precision for smaller
-//! output.
+//! compactly. Text is preserved as text (`preserve_text`). This is a
+//! normalization rather than a byte-exact transform: by default it keeps high
+//! coordinate precision (8 decimal places, usvg's maximum) so geometry is
+//! visually preserved, and `--lossy` reduces precision further for smaller
+//! output. (usvg does not offer unbounded precision, so this is "visually
+//! lossless" rather than bit-for-bit.)
 //!
 //! Because `usvg` does not understand SMIL animation, scripting, or
 //! `foreignObject`, any SVG using those is left untouched (we never silently
@@ -57,5 +60,9 @@ impl Optimizer for SvgOptimizer {
 
         let optimized = tree.to_string(&write_opts);
         Ok(vec![optimized.into_bytes()])
+    }
+
+    fn validate(&self, bytes: &[u8]) -> bool {
+        usvg::Tree::from_data(bytes, &Options::default()).is_ok()
     }
 }

@@ -3,13 +3,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::Serialize;
-
 use crate::format::ImageFormat;
 
 /// Outcome of attempting to optimize one image.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OptimizeStatus {
     /// A smaller, valid output was produced (and written, unless dry-run).
     Optimized,

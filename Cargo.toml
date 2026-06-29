@@ -28,7 +28,6 @@ webp = "0.3"
 # pure-Rust `gif` crate (lossless) + `imagequant` (lossy) instead.
 gif = "0.14"
 usvg = "0.47"
-ravif = "0.13"
 rgb = "0.8"
 
 # --- engine support ---

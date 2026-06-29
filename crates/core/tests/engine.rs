@@ -2,7 +2,10 @@
 
 use std::io::Cursor;
 
-use imageopt_core::{optimize_bytes, optimize_file, OptimizeOptions, OptimizeStatus, OutputSink};
+use imageopt_core::{
+    optimize_bytes, optimize_file, Error, MetadataPolicy, OptimizeOptions, OptimizeStatus,
+    OutputSink,
+};
 
 /// A deliberately weakly-compressed PNG so there is room to optimize.
 fn make_png() -> Vec<u8> {
@@ -94,4 +97,46 @@ fn dry_run_leaves_file_untouched_inplace_writes_smaller() {
     let new_len = std::fs::metadata(&path).unwrap().len();
     assert!(new_len < original_len, "{new_len} !< {original_len}");
     assert!(image::load_from_memory(&std::fs::read(&path).unwrap()).is_ok());
+}
+
+#[test]
+fn rejects_images_over_pixel_limit() {
+    let input = make_png(); // 128x128 = 16384 px
+    let opts = OptimizeOptions {
+        max_pixels: 1024, // far below the image
+        ..Default::default()
+    };
+    match optimize_bytes(&input, &opts) {
+        Err(Error::TooLarge { pixels, limit }) => {
+            assert_eq!(pixels, 128 * 128);
+            assert_eq!(limit, 1024);
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+}
+
+#[test]
+fn lossy_rebuild_only_allowed_when_stripping_all() {
+    // The metadata-policy gate: lossy raster candidates that drop metadata are
+    // only emitted when the policy strips everything.
+    let strip_all = OptimizeOptions {
+        lossy: true,
+        metadata: MetadataPolicy::StripAll,
+        ..Default::default()
+    };
+    assert!(strip_all.allow_lossy_rebuild());
+
+    let keep_profile = OptimizeOptions {
+        lossy: true,
+        metadata: MetadataPolicy::KeepColorProfile,
+        ..Default::default()
+    };
+    assert!(!keep_profile.allow_lossy_rebuild());
+
+    let lossless = OptimizeOptions {
+        lossy: false,
+        metadata: MetadataPolicy::StripAll,
+        ..Default::default()
+    };
+    assert!(!lossless.allow_lossy_rebuild());
 }

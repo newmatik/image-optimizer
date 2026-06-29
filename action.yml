@@ -21,9 +21,9 @@ inputs:
     required: false
     default: "false"
   strip:
-    description: "Metadata policy: all | color | none."
+    description: "Metadata policy: all | color | none. Empty = imageopt default (keep color profile, or strip-all when lossy)."
     required: false
-    default: "color"
+    default: ""
   check:
     description: "CI gate: write nothing and fail if any file could be optimized (true/false)."
     required: false
@@ -37,9 +37,9 @@ inputs:
     required: false
     default: "false"
   version:
-    description: "Release version to download (e.g. v0.1.0) or 'latest'."
+    description: "Release version to download (e.g. v0.1.0) or 'latest'. Empty = the release matching the action ref you pinned (recommended)."
     required: false
-    default: "latest"
+    default: ""
   extra-args:
     description: "Additional raw CLI flags appended verbatim."
     required: false
@@ -50,26 +50,43 @@ runs:
   steps:
     - name: Optimize images
       shell: bash
+      # All inputs are passed via the environment (never interpolated into the
+      # script body) so untrusted input can't inject shell commands.
       env:
         GH_TOKEN: ${{ github.token }}
         IO_REPO: ${{ github.action_repository }}
+        IO_REF: ${{ github.action_ref }}
+        IO_VERSION: ${{ inputs.version }}
+        IO_PATHS: ${{ inputs.paths }}
+        IO_EXTRA: ${{ inputs.extra-args }}
+        IO_LOSSY: ${{ inputs.lossy }}
+        IO_QUALITY: ${{ inputs.quality }}
+        IO_RECURSIVE: ${{ inputs.recursive }}
+        IO_STRIP: ${{ inputs.strip }}
+        IO_CHECK: ${{ inputs.check }}
+        IO_DRYRUN: ${{ inputs.dry-run }}
+        IO_JSON: ${{ inputs.json }}
       run: |
-        set -euo pipefail
+        set -eo pipefail
 
         os=$(uname -s); arch=$(uname -m)
         case "$os-$arch" in
-          Linux-x86_64)        target=x86_64-unknown-linux-gnu ;;
+          Linux-x86_64)              target=x86_64-unknown-linux-gnu ;;
           Linux-aarch64|Linux-arm64) target=aarch64-unknown-linux-gnu ;;
-          Darwin-arm64)        target=aarch64-apple-darwin ;;
-          Darwin-x86_64)       target=x86_64-apple-darwin ;;
+          Darwin-arm64)              target=aarch64-apple-darwin ;;
+          Darwin-x86_64)             target=x86_64-apple-darwin ;;
           *) echo "::error::Unsupported runner $os-$arch (use a Linux or macOS runner)"; exit 1 ;;
         esac
 
         repo="${IO_REPO:-newmatik/image-optimizer}"
-        ver="${{ inputs.version }}"
+        # Default to the release matching the action ref the caller pinned so the
+        # CLI binary can't drift from the action contract; fall back to latest.
+        ver="$IO_VERSION"
+        [ -z "$ver" ] && ver="$IO_REF"
+        [ -z "$ver" ] && ver="latest"
+
         dir="$RUNNER_TEMP/imageopt"
         mkdir -p "$dir"
-
         pattern="imageopt-*-${target}.tar.gz"
         echo "Downloading $pattern from $repo ($ver)…"
         if [ "$ver" = "latest" ]; then
@@ -83,15 +100,21 @@ runs:
         chmod +x "$bin"
 
         args=()
-        [ "${{ inputs.lossy }}" = "true" ] && args+=(--lossy)
-        [ -n "${{ inputs.quality }}" ] && args+=(--quality "${{ inputs.quality }}")
-        [ "${{ inputs.recursive }}" = "true" ] && args+=(--recursive)
-        [ "${{ inputs.check }}" = "true" ] && args+=(--check)
-        [ "${{ inputs.dry-run }}" = "true" ] && args+=(--dry-run)
-        [ "${{ inputs.json }}" = "true" ] && args+=(--json)
-        args+=(--strip "${{ inputs.strip }}")
+        [ "$IO_LOSSY" = "true" ] && args+=(--lossy)
+        [ -n "$IO_QUALITY" ] && args+=(--quality "$IO_QUALITY")
+        [ "$IO_RECURSIVE" = "true" ] && args+=(--recursive)
+        [ "$IO_CHECK" = "true" ] && args+=(--check)
+        [ "$IO_DRYRUN" = "true" ] && args+=(--dry-run)
+        [ "$IO_JSON" = "true" ] && args+=(--json)
+        [ -n "$IO_STRIP" ] && args+=(--strip "$IO_STRIP")
 
-        # Paths and extra-args are intentionally left unquoted so the binary
-        # receives each path/flag as a separate argument (it expands globs itself).
-        # shellcheck disable=SC2086
-        "$bin" "${args[@]}" ${{ inputs.extra-args }} ${{ inputs.paths }}
+        # Split paths/extra-args on whitespace (incl. newlines) into separate,
+        # quoted arguments: the shell never expands globs/metacharacters —
+        # imageopt does its own glob expansion.
+        read -r -a path_args <<< "${IO_PATHS//$'\n'/ }"
+        read -r -a extra_args <<< "${IO_EXTRA//$'\n'/ }"
+        if [ "${#path_args[@]}" -eq 0 ]; then
+          echo "::error::No paths provided"; exit 1
+        fi
+
+        "$bin" "${args[@]}" "${extra_args[@]}" "${path_args[@]}"

@@ -10,7 +10,6 @@ description = "Image optimization engine for imageopt (lossless/lossy, multi-cod
 [dependencies]
 image = { workspace = true }
 rayon = { workspace = true }
-serde = { workspace = true }
 thiserror = { workspace = true }
 tempfile = { workspace = true }
 
@@ -23,7 +22,6 @@ rgb = { workspace = true, optional = true }
 webp = { workspace = true, optional = true }
 gif = { workspace = true, optional = true }
 usvg = { workspace = true, optional = true }
-ravif = { workspace = true, optional = true }
 
 [features]
 default = ["jpeg", "png", "gif", "webp", "svg"]
@@ -32,8 +30,6 @@ png = ["dep:oxipng", "dep:imagequant", "dep:rgb"]
 gif = ["dep:gif", "dep:imagequant", "dep:rgb"]
 webp = ["dep:webp"]
 svg = ["dep:usvg"]
-# AVIF re-optimization is off by default (rare inputs, heaviest build dep).
-avif = ["dep:ravif", "dep:rgb"]
 
 [dev-dependencies]
 image = { workspace = true, features = ["jpeg", "png", "gif"] }

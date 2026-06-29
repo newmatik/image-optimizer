@@ -13,7 +13,6 @@ use oxipng::{Options, StripChunks};
 
 use super::Optimizer;
 use crate::error::Error;
-use crate::metadata::keep_color_profile;
 use crate::options::{MetadataPolicy, OptimizeOptions};
 
 pub struct PngOptimizer;
@@ -28,7 +27,9 @@ impl Optimizer for PngOptimizer {
             .map_err(|e| Error::Encode(format!("oxipng: {e}")))?;
         out.push(lossless);
 
-        if opts.lossy {
+        // Lossy quantization rebuilds the PNG from RGBA pixels, discarding any
+        // source metadata, so only offer it when the policy is to strip all.
+        if opts.allow_lossy_rebuild() {
             if let Ok(q) = quantize(input, opts) {
                 out.push(q);
             }
@@ -86,28 +87,26 @@ fn quantize(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error> {
         .remapped(&mut qimg)
         .map_err(|e| Error::Encode(format!("imagequant remap: {e:?}")))?;
 
-    // Rebuild an RGBA8 image from the palette so oxipng can store it as an
-    // optimal indexed PNG (it detects the ≤256 colors and builds the palette).
-    let mut rgba = image::RgbaImage::new(w, h);
-    for (i, &idx) in indices.iter().enumerate() {
+    // Rebuild RGBA bytes from the palette so oxipng can store an optimal indexed
+    // PNG (it detects the ≤256 colors and builds the palette). `indices` is in
+    // row order, so fill the buffer directly.
+    let mut raw = Vec::with_capacity(indices.len() * 4);
+    for &idx in &indices {
         let c = palette[idx as usize];
-        let x = (i as u32) % w;
-        let y = (i as u32) / w;
-        rgba.put_pixel(x, y, image::Rgba([c.r, c.g, c.b, c.a]));
+        raw.extend_from_slice(&[c.r, c.g, c.b, c.a]);
     }
 
     let mut buf = Vec::new();
     {
         use image::ImageEncoder;
         image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut buf))
-            .write_image(rgba.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+            .write_image(&raw, w, h, image::ExtendedColorType::Rgba8)
             .map_err(|e| Error::Encode(format!("png reencode: {e}")))?;
     }
 
+    // The quantized image is rebuilt from pixels and carries no source metadata
+    // (this path only runs under StripAll anyway), so strip everything.
     let mut o = oxipng_options(opts);
-    // The quantized image carries no source metadata; never keep a profile here.
-    if !keep_color_profile(opts.metadata) {
-        o.strip = StripChunks::All;
-    }
+    o.strip = StripChunks::All;
     oxipng::optimize_from_memory(&buf, &o).map_err(|e| Error::Encode(format!("oxipng(lossy): {e}")))
 }

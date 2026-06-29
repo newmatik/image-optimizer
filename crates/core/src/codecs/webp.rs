@@ -27,11 +27,19 @@ impl Optimizer for WebpOptimizer {
         // Lossless re-encode (useful when the source is lossless but inefficient).
         out.push(encoder.encode_lossless().to_vec());
 
-        if opts.lossy {
+        // Lossy WebP re-encodes from decoded pixels, dropping metadata, so only
+        // offer it when the policy permits stripping everything.
+        if opts.allow_lossy_rebuild() {
             let quality = opts.quality_or(80) as f32;
             out.push(encoder.encode(quality).to_vec());
         }
 
         Ok(out)
+    }
+
+    fn validate(&self, bytes: &[u8]) -> bool {
+        // The `image` crate's pure-Rust WebP decoder is lossless-only; use
+        // libwebp so lossy candidates validate too.
+        webp::Decoder::new(bytes).decode().is_some()
     }
 }

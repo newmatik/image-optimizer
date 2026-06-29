@@ -45,7 +45,5 @@ pub fn supported_formats() -> &'static [ImageFormat] {
         ImageFormat::WebP,
         #[cfg(feature = "svg")]
         ImageFormat::Svg,
-        #[cfg(feature = "avif")]
-        ImageFormat::Avif,
     ]
 }

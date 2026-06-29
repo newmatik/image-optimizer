@@ -1,11 +1,8 @@
 //! Image format detection by content (magic bytes), independent of file
 //! extension.
 
-use serde::Serialize;
-
 /// A recognized image format.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFormat {
     Jpeg,
     Png,
@@ -92,11 +89,22 @@ pub fn detect_format(bytes: &[u8]) -> ImageFormat {
     if b.len() >= 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
         return ImageFormat::WebP;
     }
-    // ISO-BMFF: `....ftyp<brand>`; AVIF brands are `avif`/`avis`/`av01`.
+    // ISO-BMFF `ftyp` box. AVIF advertises `avif`/`avis` either as the major
+    // brand (bytes 8..12) or among the compatible brands (from byte 16 on, in
+    // 4-byte entries) — e.g. `ftypmif1` with `avif` in the compatible list.
     if b.len() >= 12 && &b[4..8] == b"ftyp" {
-        let brand = &b[8..12];
-        if brand == b"avif" || brand == b"avis" || brand == b"av01" {
+        let is_avif = |x: &[u8]| x == b"avif" || x == b"avis";
+        let box_size = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        let end = box_size.clamp(8, b.len());
+        if is_avif(&b[8..12]) {
             return ImageFormat::Avif;
+        }
+        let mut i = 16; // skip major_brand (8..12) and minor_version (12..16)
+        while i + 4 <= end {
+            if is_avif(&b[i..i + 4]) {
+                return ImageFormat::Avif;
+            }
+            i += 4;
         }
     }
     if looks_like_svg(b) {
@@ -137,6 +145,11 @@ mod tests {
         assert_eq!(detect_format(b"GIF89a....."), ImageFormat::Gif);
         assert_eq!(detect_format(b"RIFF\0\0\0\0WEBPVP8 "), ImageFormat::WebP);
         assert_eq!(detect_format(b"\0\0\0\x20ftypavif"), ImageFormat::Avif);
+        // AVIF advertised only via a compatible brand (major brand mif1).
+        assert_eq!(
+            detect_format(b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00mif1avif"),
+            ImageFormat::Avif
+        );
         assert_eq!(detect_format(b""), ImageFormat::Unknown);
         assert_eq!(detect_format(b"not an image"), ImageFormat::Unknown);
     }

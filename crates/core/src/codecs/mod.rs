@@ -24,6 +24,14 @@ pub trait Optimizer {
     /// Return zero or more candidate encodings. An empty result means "nothing
     /// better was produced"; the engine will then keep the original.
     fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<Vec<Vec<u8>>, Error>;
+
+    /// Validate that produced bytes decode as a valid image, so the engine never
+    /// writes a corrupt candidate over a good original. The default re-decodes
+    /// via the `image` crate; codecs whose format `image` cannot (re)decode
+    /// reliably (WebP, SVG) override this.
+    fn validate(&self, bytes: &[u8]) -> bool {
+        image::load_from_memory(bytes).is_ok()
+    }
 }
 
 /// Resolve the optimizer for a detected format, if this build supports it.

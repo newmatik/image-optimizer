@@ -101,7 +101,7 @@ imageopt --json assets/ > report.json
 | `--lossy` | Allow lossy recompression. |
 | `-q, --quality <1-100>` | Quality for lossy encoders (implies `--lossy`). |
 | `--png-level <0-6>` | oxipng effort; 6 enables Zopfli (slowest). Default 3. |
-| `--strip <all\|color\|none>` | Metadata: strip all, keep ICC color profile (default), or keep everything. |
+| `--strip <all\|color\|none>` | Metadata: strip all, keep ICC color profile, or keep everything. Default: keep the color profile — but with `--lossy` the default becomes `all` (see note). |
 | `--dry-run` | Report what would change without modifying files. |
 | `--backup` | Copy each original to `<name>.orig` before overwriting. |
 | `--check` | CI gate: write nothing; exit non-zero if any file could be optimized. |
@@ -112,6 +112,13 @@ imageopt --json assets/ > report.json
 
 By default `imageopt` **optimizes files in place** (writes are atomic). Use
 `--dry-run` to preview or `--backup` to keep originals.
+
+> **Lossy and metadata:** lossy re-encoders (JPEG/PNG/WebP) rebuild the image
+> from pixels and cannot preserve an embedded ICC profile, so `--lossy` defaults
+> to stripping all metadata. If you pass `--strip color`/`--strip none` together
+> with `--lossy`, the metadata policy is honored and those files fall back to
+> lossless optimization (the lossy candidate is skipped). SVG `--lossy` only
+> reduces coordinate precision and is unaffected.
 
 ### Exit codes
 

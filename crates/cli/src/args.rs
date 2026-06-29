@@ -31,8 +31,10 @@ pub struct Cli {
     pub png_level: u8,
 
     /// Metadata handling: strip all, keep only the color profile, or keep all.
-    #[arg(long, value_enum, default_value_t = StripArg::Color)]
-    pub strip: StripArg,
+    /// Default: keep the color profile — except with --lossy, which rebuilds the
+    /// image and cannot preserve metadata, so the default there is "all".
+    #[arg(long, value_enum)]
+    pub strip: Option<StripArg>,
 
     /// Show what would change without modifying any files.
     #[arg(long)]
@@ -76,16 +78,24 @@ pub enum StripArg {
 impl Cli {
     /// Build the engine options from the parsed flags.
     pub fn to_options(&self) -> OptimizeOptions {
+        // A quality value implies lossy.
+        let lossy = self.lossy || self.quality.is_some();
+        let metadata = match self.strip {
+            Some(StripArg::All) => MetadataPolicy::StripAll,
+            Some(StripArg::Color) => MetadataPolicy::KeepColorProfile,
+            Some(StripArg::None) => MetadataPolicy::KeepAll,
+            // Unspecified: keep the color profile by default, but lossy
+            // re-encoders rebuild the image and drop metadata, so default to
+            // stripping all when lossy (otherwise lossy candidates are skipped
+            // to honor the policy — see OptimizeOptions::allow_lossy_rebuild).
+            None if lossy => MetadataPolicy::StripAll,
+            None => MetadataPolicy::KeepColorProfile,
+        };
         OptimizeOptions {
-            // A quality value implies lossy.
-            lossy: self.lossy || self.quality.is_some(),
+            lossy,
             quality: self.quality,
             png_level: self.png_level,
-            metadata: match self.strip {
-                StripArg::All => MetadataPolicy::StripAll,
-                StripArg::Color => MetadataPolicy::KeepColorProfile,
-                StripArg::None => MetadataPolicy::KeepAll,
-            },
+            metadata,
             keep_larger: self.keep_larger,
             ..Default::default()
         }

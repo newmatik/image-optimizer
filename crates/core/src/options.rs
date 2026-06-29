@@ -57,4 +57,13 @@ impl OptimizeOptions {
     pub fn quality_or(&self, default: u8) -> u8 {
         self.quality.unwrap_or(default).clamp(1, 100)
     }
+
+    /// Whether a lossy raster candidate that *rebuilds the image from pixels*
+    /// may be emitted. Such re-encoders (lossy JPEG/PNG/WebP) cannot preserve an
+    /// embedded ICC profile or other metadata, so they only run when the policy
+    /// is to strip everything — otherwise a smaller-but-profile-less candidate
+    /// could win and violate `KeepColorProfile`/`KeepAll`.
+    pub fn allow_lossy_rebuild(&self) -> bool {
+        self.lossy && matches!(self.metadata, MetadataPolicy::StripAll)
+    }
 }

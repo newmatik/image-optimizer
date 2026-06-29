@@ -46,11 +46,17 @@ fn push_unique(path: PathBuf, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf
     }
 }
 
-fn looks_like_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| ImageFormat::from_extension(e) != ImageFormat::Unknown)
-        .unwrap_or(false)
+/// Whether a file found during a directory walk should be handed to the engine.
+/// Files with a known image extension qualify, and so do *extensionless* files
+/// (the engine detects format by content, so a misnamed/extensionless image is
+/// still optimized). Files with a known non-image extension are skipped to avoid
+/// reading every unrelated file in a tree. Explicitly named files and globs are
+/// never filtered this way.
+fn should_consider(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        None => true,
+        Some(ext) => ImageFormat::from_extension(ext) != ImageFormat::Unknown,
+    }
 }
 
 fn collect_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
@@ -60,7 +66,7 @@ fn collect_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>, seen: &mut H
         .into_iter()
         .filter_map(Result::ok)
     {
-        if entry.file_type().is_file() && looks_like_image(entry.path()) {
+        if entry.file_type().is_file() && should_consider(entry.path()) {
             push_unique(entry.into_path(), out, seen);
         }
     }
@@ -80,22 +86,38 @@ fn collect_glob(pattern: &str, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBu
     }
 }
 
-/// The longest leading run of path components that contain no glob metacharacters.
+/// The literal directory prefix of a glob: everything up to (but not including)
+/// the first path segment containing a glob metacharacter.
+///
+/// Works on the raw string and splits on both `/` and `\\`, so absolute POSIX
+/// roots (`/srv/...`) and Windows drive prefixes (`C:\...`) are preserved
+/// verbatim instead of being dropped or collapsed to `.`.
 fn glob_root(pattern: &str) -> PathBuf {
-    let mut root = PathBuf::new();
-    for component in pattern.split('/') {
-        if has_glob(component) {
-            break;
+    let bytes = pattern.as_bytes();
+    let mut seg_start = 0;
+    let mut cut = pattern.len();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'/' | b'\\' => seg_start = i + 1,
+            b'*' | b'?' | b'[' => {
+                cut = seg_start; // the first glob segment starts here
+                break;
+            }
+            _ => {}
         }
-        root.push(component);
     }
-    if root.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else if root.is_dir() {
+
+    let prefix = &pattern[..cut];
+    if prefix.is_empty() {
+        return PathBuf::from(".");
+    }
+    let root = PathBuf::from(prefix);
+    if root.is_dir() {
         root
     } else {
-        // Leading component was a file or doesn't exist; walk its parent.
+        // Leading literal segment is a file or doesn't exist; walk its parent.
         root.parent()
+            .filter(|p| !p.as_os_str().is_empty())
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."))
     }

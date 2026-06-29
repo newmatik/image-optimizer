@@ -27,18 +27,23 @@ impl Optimizer for JpegOptimizer {
     fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<Vec<Vec<u8>>, Error> {
         let mut out = Vec::new();
 
+        // A lossy re-encode discards ICC/EXIF/COM markers, so it may only be
+        // offered when the policy is to strip everything (otherwise a smaller
+        // profile-less candidate could win and violate the metadata policy).
+        let allow_lossy = opts.allow_lossy_rebuild();
+
         match lossless_transform(input, opts) {
             Ok(v) => out.push(v),
             Err(e) => {
                 // If lossless failed and we won't try a lossy re-encode, this is
                 // a genuine failure (engine -> Failed, original untouched).
-                if !opts.lossy {
+                if !allow_lossy {
                     return Err(e);
                 }
             }
         }
 
-        if opts.lossy {
+        if allow_lossy {
             match lossy_reencode(input, opts) {
                 Ok(v) => out.push(v),
                 Err(e) => {
@@ -74,6 +79,22 @@ struct CompressGuard(*mut mozjpeg_sys::jpeg_compress_struct);
 impl Drop for CompressGuard {
     fn drop(&mut self) {
         unsafe { mozjpeg_sys::jpeg_destroy_compress(&mut *self.0) }
+    }
+}
+
+/// Frees the `jpeg_mem_dest` output buffer (malloc'd by libjpeg) even if a later
+/// libjpeg call unwinds via `error_exit` before we copy it out. Holds the
+/// address of the buffer pointer so it reads the final (possibly realloc'd)
+/// value at drop time.
+struct MemDestBuf(*mut *mut u8);
+impl Drop for MemDestBuf {
+    fn drop(&mut self) {
+        unsafe {
+            let p = *self.0;
+            if !p.is_null() {
+                libc::free(p as *mut libc::c_void);
+            }
+        }
     }
 }
 
@@ -138,6 +159,8 @@ unsafe fn jpegtran(input: &[u8], keep_icc: bool, keep_all_markers: bool) -> Resu
     let mut outbuf: *mut u8 = ptr::null_mut();
     let mut outsize: c_ulong = 0;
     jpeg_mem_dest(&mut *cinfo, &mut outbuf, &mut outsize);
+    // RAII so the buffer is freed even if a later libjpeg call unwinds.
+    let _outbuf_guard = MemDestBuf(&mut outbuf);
 
     jpeg_copy_critical_parameters(&*dinfo, &mut *cinfo);
     cinfo.optimize_coding = TRUE; // optimized Huffman tables
@@ -163,16 +186,12 @@ unsafe fn jpegtran(input: &[u8], keep_icc: bool, keep_all_markers: bool) -> Resu
     jpeg_finish_compress(&mut *cinfo);
     jpeg_finish_decompress(&mut *dinfo);
 
-    let result = if outbuf.is_null() || outsize == 0 {
+    if outbuf.is_null() || outsize == 0 {
         Err(Error::Encode("libjpeg produced an empty output".into()))
     } else {
         Ok(std::slice::from_raw_parts(outbuf, outsize as usize).to_vec())
-    };
-    if !outbuf.is_null() {
-        libc::free(outbuf as *mut libc::c_void);
     }
-    result
-    // _cguard, _dguard, jerr drop here (in that order).
+    // _outbuf_guard frees the buffer; _cguard, _dguard, jerr drop after.
 }
 
 // --- lossy (decode + re-encode) --------------------------------------------
@@ -214,16 +233,6 @@ fn lossy_reencode(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error
 fn flatten(r: std::thread::Result<Result<Vec<u8>, Error>>) -> Result<Vec<u8>, Error> {
     match r {
         Ok(inner) => inner,
-        Err(p) => Err(Error::Panicked(panic_str(p))),
-    }
-}
-
-fn panic_str(p: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = p.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = p.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".to_string()
+        Err(p) => Err(Error::Panicked(crate::error::panic_message(p))),
     }
 }

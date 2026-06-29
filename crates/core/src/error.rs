@@ -32,3 +32,15 @@ pub enum Error {
     #[error("{0}")]
     Other(String),
 }
+
+/// Extract a human-readable message from a caught panic payload (the value
+/// returned by `std::panic::catch_unwind` on the `Err` path).
+pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}

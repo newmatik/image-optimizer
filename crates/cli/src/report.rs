@@ -28,11 +28,12 @@ fn name_of(r: &OptimizeResult) -> String {
 }
 
 fn colored_status(status: &OptimizeStatus) -> String {
+    let text = status.label();
     match status {
-        OptimizeStatus::Optimized => "optimized".green().to_string(),
-        OptimizeStatus::AlreadyOptimal => "already optimal".dimmed().to_string(),
-        OptimizeStatus::Skipped { .. } => "skipped".yellow().to_string(),
-        OptimizeStatus::Failed { .. } => "failed".red().to_string(),
+        OptimizeStatus::Optimized => text.green().to_string(),
+        OptimizeStatus::AlreadyOptimal => text.dimmed().to_string(),
+        OptimizeStatus::Skipped { .. } => text.yellow().to_string(),
+        OptimizeStatus::Failed { .. } => text.red().to_string(),
     }
 }
 
@@ -60,19 +61,18 @@ pub fn print_table(results: &[OptimizeResult], cli: &Cli) {
     );
 
     for r in results {
-        let saved = if matches!(r.status, OptimizeStatus::Optimized) {
-            format!("{:.1}%", r.saved_percent())
+        let (saved, new_size) = if r.is_optimized() {
+            (
+                format!("{:.1}%", r.saved_percent()),
+                human_size(r.optimized_size),
+            )
         } else {
-            "—".to_string()
+            ("—".to_string(), "—".to_string())
         };
-        let new_size = match r.status {
-            OptimizeStatus::Optimized => human_size(r.optimized_size),
-            _ => "—".to_string(),
+        let detail = match &r.status {
+            OptimizeStatus::Failed { error } => format!(" ({error})"),
+            _ => String::new(),
         };
-        let mut detail = String::new();
-        if let OptimizeStatus::Failed { error } = &r.status {
-            detail = format!(" ({error})");
-        }
         anstream::println!(
             "{:<name_w$}  {:<6}  {:>10}  {:>10}  {:>8}  {}{}",
             truncate(&name_of(r), name_w),
@@ -109,9 +109,10 @@ pub fn print_summary(results: &[OptimizeResult]) {
         }
     }
 
-    let saved = total_orig.saturating_sub(total_new);
+    // Signed so `--keep-larger` (which can grow the total) is reported honestly.
+    let delta = total_orig as i64 - total_new as i64; // >0 saved, <0 grew
     let pct = if total_orig > 0 {
-        saved as f64 / total_orig as f64 * 100.0
+        delta as f64 / total_orig as f64 * 100.0
     } else {
         0.0
     };
@@ -127,14 +128,23 @@ pub fn print_summary(results: &[OptimizeResult]) {
         parts.push(format!("{failed} failed"));
     }
 
+    let change = if delta >= 0 {
+        format!("-{pct:.1}%, saved {}", human_size(delta as u64))
+            .green()
+            .to_string()
+    } else {
+        format!("+{:.1}%, grew {}", -pct, human_size((-delta) as u64))
+            .red()
+            .to_string()
+    };
+
     anstream::println!(
-        "\n{}  {}  {} → {}  ({}, saved {})",
+        "\n{}  {}  {} → {}  ({})",
         "TOTAL".bold(),
         parts.join(", "),
         human_size(total_orig),
         human_size(total_new),
-        format!("-{pct:.1}%").green(),
-        human_size(saved),
+        change,
     );
 }
 
@@ -155,17 +165,13 @@ pub fn print_json(results: &[OptimizeResult]) {
                 "status": status,
                 "error": error,
                 "original_size": r.original_size,
-                "optimized_size": if matches!(r.status, OptimizeStatus::Optimized) {
+                "optimized_size": if r.is_optimized() {
                     r.optimized_size
                 } else {
                     r.original_size
                 },
-                "saved_bytes": if matches!(r.status, OptimizeStatus::Optimized) {
-                    r.saved_bytes()
-                } else {
-                    0
-                },
-                "saved_percent": if matches!(r.status, OptimizeStatus::Optimized) {
+                "saved_bytes": if r.is_optimized() { r.saved_bytes() } else { 0 },
+                "saved_percent": if r.is_optimized() {
                     (r.saved_percent() * 100.0).round() / 100.0
                 } else {
                     0.0
