@@ -259,10 +259,17 @@ fn backup_original(path: &Path) -> std::io::Result<()> {
         .open(&dst)
     {
         Ok(mut out) => {
-            let mut src = fs::File::open(path)?;
-            std::io::copy(&mut src, &mut out)?;
-            out.sync_all()?;
-            Ok(())
+            // If copy/sync fails after create_new, remove the partial .orig so a
+            // later run isn't blocked by a truncated/empty backup.
+            let written = (|| {
+                let mut src = fs::File::open(path)?;
+                std::io::copy(&mut src, &mut out)?;
+                out.sync_all()
+            })();
+            if written.is_err() {
+                let _ = fs::remove_file(&dst);
+            }
+            written
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e),

@@ -79,11 +79,17 @@ runs:
         esac
 
         repo="${IO_REPO:-newmatik/image-optimizer}"
-        # Default to the release matching the action ref the caller pinned so the
-        # CLI binary can't drift from the action contract; fall back to latest.
+        # Pick the binary version: an explicit input wins; otherwise prefer the
+        # pinned action ref *only if it is a real release tag* (it can also be a
+        # branch or SHA, which has no matching release), else fall back to latest.
         ver="$IO_VERSION"
-        [ -z "$ver" ] && ver="$IO_REF"
-        [ -z "$ver" ] && ver="latest"
+        if [ -z "$ver" ]; then
+          if [ -n "$IO_REF" ] && gh release view "$IO_REF" --repo "$repo" >/dev/null 2>&1; then
+            ver="$IO_REF"
+          else
+            ver="latest"
+          fi
+        fi
 
         dir="$RUNNER_TEMP/imageopt"
         mkdir -p "$dir"
