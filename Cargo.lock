@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "imageopt"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anstream 0.6.21",
  "clap",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "imageopt-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "gif",
  "image",

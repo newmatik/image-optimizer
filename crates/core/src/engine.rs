@@ -120,10 +120,12 @@ fn pick_best(
         if !codec.validate(&cand) {
             continue;
         }
-        // This is the smallest valid candidate (best savings). If it doesn't
-        // clear the threshold, no larger candidate will either, so keep the
-        // original. The gate doesn't apply to the explicit keep-larger override.
-        if !keep_larger && min_savings_percent > 0.0 && !input.is_empty() {
+        // This is the smallest valid candidate (best savings). If a *smaller*
+        // candidate doesn't clear the threshold, no other will either, so keep
+        // the original. The gate is keyed on the candidate actually being
+        // smaller (not on `keep_larger`) so `--min-savings` is honored even when
+        // `keep_larger` is set; `keep_larger` only governs non-smaller outputs.
+        if cand.len() < input.len() && min_savings_percent > 0.0 && !input.is_empty() {
             let saved = (input.len() as f64 - cand.len() as f64) / input.len() as f64 * 100.0;
             if saved < min_savings_percent {
                 return (input.to_vec(), OptimizeStatus::AlreadyOptimal);

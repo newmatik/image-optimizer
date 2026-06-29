@@ -134,6 +134,18 @@ fn min_savings_threshold_gates_small_wins() {
     assert_eq!(r1.status, OptimizeStatus::AlreadyOptimal);
     assert_eq!(r1.bytes, input, "original must be kept when gated");
 
+    // The threshold must hold for a *smaller* candidate even with keep_larger.
+    let strict_keep_larger = OptimizeOptions {
+        min_savings_percent: actual_saved + 1.0,
+        keep_larger: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        optimize_bytes(&input, &strict_keep_larger).unwrap().status,
+        OptimizeStatus::AlreadyOptimal,
+        "keep_larger must not bypass the min-savings gate for smaller candidates"
+    );
+
     // A threshold below the achievable savings still optimizes.
     let loose = OptimizeOptions {
         min_savings_percent: actual_saved - 1.0,
