@@ -1,0 +1,97 @@
+name: "Image Optimizer"
+description: "Optimize images in place (JPEG/PNG/GIF/WebP/SVG), ImageOptim-style, in CI."
+branding:
+  icon: "image"
+  color: "green"
+
+inputs:
+  paths:
+    description: "Files, directories, or glob patterns to optimize (space- or newline-separated)."
+    required: true
+  lossy:
+    description: "Enable lossy recompression (true/false)."
+    required: false
+    default: "false"
+  quality:
+    description: "Quality 1-100 for lossy encoders (implies lossy)."
+    required: false
+    default: ""
+  recursive:
+    description: "Recurse into subdirectories (true/false)."
+    required: false
+    default: "false"
+  strip:
+    description: "Metadata policy: all | color | none."
+    required: false
+    default: "color"
+  check:
+    description: "CI gate: write nothing and fail if any file could be optimized (true/false)."
+    required: false
+    default: "false"
+  dry-run:
+    description: "Report only; do not modify files (true/false)."
+    required: false
+    default: "false"
+  json:
+    description: "Emit JSON output (true/false)."
+    required: false
+    default: "false"
+  version:
+    description: "Release version to download (e.g. v0.1.0) or 'latest'."
+    required: false
+    default: "latest"
+  extra-args:
+    description: "Additional raw CLI flags appended verbatim."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Optimize images
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        IO_REPO: ${{ github.action_repository }}
+      run: |
+        set -euo pipefail
+
+        os=$(uname -s); arch=$(uname -m)
+        case "$os-$arch" in
+          Linux-x86_64)        target=x86_64-unknown-linux-gnu ;;
+          Linux-aarch64|Linux-arm64) target=aarch64-unknown-linux-gnu ;;
+          Darwin-arm64)        target=aarch64-apple-darwin ;;
+          Darwin-x86_64)       target=x86_64-apple-darwin ;;
+          *) echo "::error::Unsupported runner $os-$arch (use a Linux or macOS runner)"; exit 1 ;;
+        esac
+
+        repo="${IO_REPO:-newmatik/image-optimizer}"
+        ver="${{ inputs.version }}"
+        dir="$RUNNER_TEMP/imageopt"
+        mkdir -p "$dir"
+
+        pattern="imageopt-*-${target}.tar.gz"
+        echo "Downloading $pattern from $repo ($ver)…"
+        if [ "$ver" = "latest" ]; then
+          gh release download --repo "$repo" --pattern "$pattern" --dir "$dir"
+        else
+          gh release download "$ver" --repo "$repo" --pattern "$pattern" --dir "$dir"
+        fi
+
+        tar -xzf "$dir"/*.tar.gz -C "$dir"
+        bin=$(find "$dir" -name imageopt -type f | head -n1)
+        chmod +x "$bin"
+
+        args=()
+        [ "${{ inputs.lossy }}" = "true" ] && args+=(--lossy)
+        [ -n "${{ inputs.quality }}" ] && args+=(--quality "${{ inputs.quality }}")
+        [ "${{ inputs.recursive }}" = "true" ] && args+=(--recursive)
+        [ "${{ inputs.check }}" = "true" ] && args+=(--check)
+        [ "${{ inputs.dry-run }}" = "true" ] && args+=(--dry-run)
+        [ "${{ inputs.json }}" = "true" ] && args+=(--json)
+        args+=(--strip "${{ inputs.strip }}")
+
+        # Paths and extra-args are intentionally left unquoted so the binary
+        # receives each path/flag as a separate argument (it expands globs itself).
+        # shellcheck disable=SC2086
+        "$bin" "${args[@]}" ${{ inputs.extra-args }} ${{ inputs.paths }}

@@ -1,0 +1,39 @@
+[package]
+name = "imageopt-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Image optimization engine for imageopt (lossless/lossy, multi-codec, never-enlarge)"
+
+[dependencies]
+image = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+
+oxipng = { workspace = true, optional = true }
+mozjpeg = { workspace = true, optional = true }
+mozjpeg-sys = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+imagequant = { workspace = true, optional = true }
+rgb = { workspace = true, optional = true }
+webp = { workspace = true, optional = true }
+gif = { workspace = true, optional = true }
+usvg = { workspace = true, optional = true }
+ravif = { workspace = true, optional = true }
+
+[features]
+default = ["jpeg", "png", "gif", "webp", "svg"]
+jpeg = ["dep:mozjpeg", "dep:mozjpeg-sys", "dep:libc"]
+png = ["dep:oxipng", "dep:imagequant", "dep:rgb"]
+gif = ["dep:gif", "dep:imagequant", "dep:rgb"]
+webp = ["dep:webp"]
+svg = ["dep:usvg"]
+# AVIF re-optimization is off by default (rare inputs, heaviest build dep).
+avif = ["dep:ravif", "dep:rgb"]
+
+[dev-dependencies]
+image = { workspace = true, features = ["jpeg", "png", "gif"] }
