@@ -80,7 +80,13 @@ pub fn optimize_bytes(input: &[u8], opts: &OptimizeOptions) -> Result<OptimizedI
     let candidates = catch_unwind(AssertUnwindSafe(|| codec.candidates(input, opts)))
         .map_err(|p| Error::Panicked(panic_message(p)))??;
 
-    let (bytes, status) = pick_best(input, candidates, codec.as_ref(), opts.keep_larger);
+    let (bytes, status) = pick_best(
+        input,
+        candidates,
+        codec.as_ref(),
+        opts.keep_larger,
+        opts.min_savings_percent,
+    );
     Ok(OptimizedImage {
         optimized_size: bytes.len() as u64,
         bytes,
@@ -91,7 +97,8 @@ pub fn optimize_bytes(input: &[u8], opts: &OptimizeOptions) -> Result<OptimizedI
 }
 
 /// Pick the smallest valid candidate. Returns the original bytes with
-/// [`OptimizeStatus::AlreadyOptimal`] if nothing smaller (and valid) is found.
+/// [`OptimizeStatus::AlreadyOptimal`] if nothing smaller (and valid) is found,
+/// or if the best candidate doesn't save at least `min_savings_percent`.
 /// The codec validates its own output (see [`codecs::Optimizer::validate`]) so
 /// we never replace a good original with something that doesn't re-decode.
 fn pick_best(
@@ -99,6 +106,7 @@ fn pick_best(
     candidates: Vec<Vec<u8>>,
     codec: &dyn codecs::Optimizer,
     keep_larger: bool,
+    min_savings_percent: f64,
 ) -> (Vec<u8>, OptimizeStatus) {
     let mut sorted = candidates;
     sorted.sort_by_key(Vec::len);
@@ -109,9 +117,21 @@ fn pick_best(
         if cand.len() >= input.len() && !keep_larger {
             continue;
         }
-        if codec.validate(&cand) {
-            return (cand, OptimizeStatus::Optimized);
+        if !codec.validate(&cand) {
+            continue;
         }
+        // This is the smallest valid candidate (best savings). If a *smaller*
+        // candidate doesn't clear the threshold, no other will either, so keep
+        // the original. The gate is keyed on the candidate actually being
+        // smaller (not on `keep_larger`) so `--min-savings` is honored even when
+        // `keep_larger` is set; `keep_larger` only governs non-smaller outputs.
+        if cand.len() < input.len() && min_savings_percent > 0.0 && !input.is_empty() {
+            let saved = (input.len() as f64 - cand.len() as f64) / input.len() as f64 * 100.0;
+            if saved < min_savings_percent {
+                return (input.to_vec(), OptimizeStatus::AlreadyOptimal);
+            }
+        }
+        return (cand, OptimizeStatus::Optimized);
     }
     (input.to_vec(), OptimizeStatus::AlreadyOptimal)
 }

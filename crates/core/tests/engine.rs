@@ -116,6 +116,48 @@ fn rejects_images_over_pixel_limit() {
 }
 
 #[test]
+fn min_savings_threshold_gates_small_wins() {
+    let input = make_png();
+
+    // With no threshold, the image optimizes.
+    let r0 = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
+    assert_eq!(r0.status, OptimizeStatus::Optimized);
+    let actual_saved =
+        (input.len() - r0.optimized_size as usize) as f64 / input.len() as f64 * 100.0;
+
+    // Requiring more savings than is achievable keeps the original untouched.
+    let strict = OptimizeOptions {
+        min_savings_percent: actual_saved + 1.0,
+        ..Default::default()
+    };
+    let r1 = optimize_bytes(&input, &strict).unwrap();
+    assert_eq!(r1.status, OptimizeStatus::AlreadyOptimal);
+    assert_eq!(r1.bytes, input, "original must be kept when gated");
+
+    // The threshold must hold for a *smaller* candidate even with keep_larger.
+    let strict_keep_larger = OptimizeOptions {
+        min_savings_percent: actual_saved + 1.0,
+        keep_larger: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        optimize_bytes(&input, &strict_keep_larger).unwrap().status,
+        OptimizeStatus::AlreadyOptimal,
+        "keep_larger must not bypass the min-savings gate for smaller candidates"
+    );
+
+    // A threshold below the achievable savings still optimizes.
+    let loose = OptimizeOptions {
+        min_savings_percent: actual_saved - 1.0,
+        ..Default::default()
+    };
+    assert_eq!(
+        optimize_bytes(&input, &loose).unwrap().status,
+        OptimizeStatus::Optimized
+    );
+}
+
+#[test]
 fn lossy_rebuild_only_allowed_when_stripping_all() {
     // The metadata-policy gate: lossy raster candidates that drop metadata are
     // only emitted when the policy strips everything.

@@ -30,6 +30,13 @@ pub struct Cli {
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=6))]
     pub png_level: u8,
 
+    /// Only rewrite a file if it shrinks by at least this percentage. Defaults to
+    /// 0 (keep any improvement) for lossless, and 10 for --lossy so repeated
+    /// runs converge instead of slowly degrading. Pass `--min-savings 0` to
+    /// squeeze every byte (not recommended in a commit-back loop).
+    #[arg(long, value_name = "PERCENT", value_parser = parse_percent)]
+    pub min_savings: Option<f64>,
+
     /// Metadata handling: strip all, keep only the color profile, or keep all.
     /// Default: keep the color profile — except with --lossy, which rebuilds the
     /// image and cannot preserve metadata, so the default there is "all".
@@ -65,6 +72,16 @@ pub struct Cli {
     pub quiet: bool,
 }
 
+/// Parse and validate a 0–100 percentage for `--min-savings`.
+fn parse_percent(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if (0.0..=100.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err("must be between 0 and 100".to_string())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum StripArg {
     /// Remove all metadata, including the ICC color profile.
@@ -97,6 +114,11 @@ impl Cli {
             png_level: self.png_level,
             metadata,
             keep_larger: self.keep_larger,
+            // Lossy re-encoders can shave a sliver on every run; require a
+            // meaningful gain (10%) by default so repeated runs converge after
+            // the first pass instead of slowly degrading. Lossless is already
+            // idempotent, so it keeps any improvement (0).
+            min_savings_percent: self.min_savings.unwrap_or(if lossy { 10.0 } else { 0.0 }),
             ..Default::default()
         }
     }
