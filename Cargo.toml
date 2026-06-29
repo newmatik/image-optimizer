@@ -3,9 +3,7 @@ resolver = "2"
 members = ["crates/core", "crates/cli"]
 
 [workspace.package]
-# 0.2.0 (not 0.1.x): adding a public field to OptimizeOptions in imageopt-core
-# is a breaking change for library consumers, so bump the minor per 0.x SemVer.
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-or-later"
@@ -15,7 +13,7 @@ authors = ["Newmatik"]
 description = "Cross-platform, all-in-one image optimizer (ImageOptim-style) — CLI"
 
 [workspace.dependencies]
-imageopt-core = { path = "crates/core", version = "0.2.0" }
+imageopt-core = { path = "crates/core", version = "0.2.1" }
 
 # --- codecs ---
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }

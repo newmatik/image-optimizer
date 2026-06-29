@@ -1,5 +1,5 @@
-name: "Image Optimizer"
-description: "Optimize images in place (JPEG/PNG/GIF/WebP/SVG), ImageOptim-style, in CI."
+name: "Newmatik Image Optimizer"
+description: "Optimize images in place (JPEG/PNG/GIF/WebP/SVG), ImageOptim-style, in CI — lossless by default, idempotent, single binary."
 branding:
   icon: "image"
   color: "green"
