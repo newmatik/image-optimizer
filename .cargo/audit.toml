@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+  # Transitive through usvg/fontdb/rustybuzz. There is no safe upgrade available
+  # at the time of writing; keep this visible so it can be removed when usvg
+  # moves to a maintained font parser stack.
+  "RUSTSEC-2026-0192",
+]

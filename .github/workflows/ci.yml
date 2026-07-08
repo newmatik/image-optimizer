@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -51,3 +55,83 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust MSRV
+        uses: dtolnay/rust-toolchain@1.82.0
+
+      - name: Install nasm
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Test
+        run: cargo test --all-features
+
+  supply-chain:
+    name: Supply Chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: supply-chain
+
+      - name: Install supply-chain tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: Audit RustSec advisories
+        run: cargo audit
+
+      - name: Check dependency policy
+        run: cargo deny check
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nasm
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error

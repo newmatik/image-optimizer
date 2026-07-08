@@ -1,0 +1,68 @@
+name: Action Smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: action-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Composite action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Create fixture images
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-assets
+          cat > smoke-assets/optimizable.svg <<'SVG'
+          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <rect width="10" height="10" fill="red" />
+          </svg>
+          SVG
+          cp smoke-assets/optimizable.svg smoke-assets/dry-run.svg
+          cp smoke-assets/optimizable.svg smoke-assets/lossy.svg
+          cp smoke-assets/optimizable.svg smoke-assets/write.svg
+
+      - name: Check mode reports optimizable files
+        id: check
+        continue-on-error: true
+        uses: ./
+        with:
+          paths: smoke-assets/optimizable.svg
+          check: "true"
+
+      - name: Assert check mode failed as expected
+        if: steps.check.outcome != 'failure'
+        shell: bash
+        run: |
+          echo "::error::check mode should fail when a file can be optimized"
+          exit 1
+
+      - name: Dry run leaves files untouched
+        uses: ./
+        with:
+          paths: smoke-assets/dry-run.svg
+          dry-run: "true"
+          json: "true"
+
+      - name: Normal lossless mode runs
+        uses: ./
+        with:
+          paths: smoke-assets/write.svg
+
+      - name: Explicit lossy mode with threshold runs
+        uses: ./
+        with:
+          paths: smoke-assets/lossy.svg
+          lossy: "true"
+          min-savings: "10"
+          dry-run: "true"
