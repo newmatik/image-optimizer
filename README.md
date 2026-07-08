@@ -50,7 +50,7 @@ Notes:
   planned enhancement.
 * **SVGs using SMIL animation, `<script>`, or `<foreignObject>` are left
   untouched** so nothing is ever silently dropped.
-* AVIF re-optimization exists behind a non-default `avif` build feature.
+* AVIF files are detected but left untouched until an AVIF optimizer is added.
 
 ## Install
 
@@ -135,15 +135,60 @@ clears the threshold, so the file is left untouched — lossy becomes effectivel
 idempotent (it converges after one pass). Pass `--min-savings 0` to squeeze every
 last byte, but don't do that in a repeated commit-back workflow.
 
+This matters most in CI. If you run `imageopt` on every push, prefer lossless
+mode or keep the default lossy threshold so JPEG/WebP assets are not recompressed
+again and again for marginal savings. JPEG lossy mode also checks the source
+quantization table and skips destructive re-encoding when the file already
+appears to be at or below the requested quality.
+
 ### Exit codes
 
 * `0` — success.
 * `1` — with `--check`, at least one file could be optimized (or failed).
 * `2` — no matching input files.
 
+### JSON output
+
+`--json` emits a stable top-level `summary` plus per-file `results`, intended
+for CI systems and dashboards:
+
+```json
+{
+  "summary": {
+    "total": 1,
+    "optimized": 1,
+    "already_optimal": 0,
+    "skipped": 0,
+    "failed": 0,
+    "original_size": 1024,
+    "optimized_size": 768,
+    "saved_bytes": 256,
+    "saved_percent": 25.0,
+    "elapsed_ms": 12,
+    "formats": { "png": 1 }
+  },
+  "results": [
+    {
+      "file": "assets/logo.png",
+      "format": "png",
+      "status": "optimized",
+      "error": null,
+      "original_size": 1024,
+      "optimized_size": 768,
+      "saved_bytes": 256,
+      "saved_percent": 25.0,
+      "elapsed_ms": 12
+    }
+  ]
+}
+```
+
+`status` is one of `optimized`, `already_optimal`, `skipped`, or `failed`.
+Skipped files are left untouched and do not fail `--check`; failed files do.
+
 ## Use in GitHub Actions
 
-This repo ships a composite action (Linux/macOS runners).
+This repo ships a composite action (Linux, macOS, and Windows runners).
 
 **Optimize images and commit the result:**
 
@@ -190,6 +235,9 @@ original.
 
 The library has no async or HTTP dependencies; an HTTP API and a desktop GUI can
 be added later as additional front-ends without touching the engine.
+
+Architecture decisions and the improvement roadmap live in
+[`docs/architecture`](docs/architecture/README.md).
 
 ## License
 
