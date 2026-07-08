@@ -5,20 +5,20 @@
 //! and can drop slack). **Animated GIFs are left untouched** — robust animated
 //! optimization needs gifsicle, whose crate only exposes a non-reentrant CLI
 //! entry point that is unsafe to call from our parallel engine. Skipping is the
-//! reliable choice; the engine reports the file as already-optimal.
+//! reliable choice; the engine reports the file as skipped with a reason.
 
 use std::io::Cursor;
 
 use gif::{ColorOutput, DecodeOptions, Encoder};
 
-use super::Optimizer;
+use super::{CandidateSet, Optimizer};
 use crate::error::Error;
 use crate::options::OptimizeOptions;
 
 pub struct GifOptimizer;
 
 impl Optimizer for GifOptimizer {
-    fn candidates(&self, input: &[u8], _opts: &OptimizeOptions) -> Result<Vec<Vec<u8>>, Error> {
+    fn candidates(&self, input: &[u8], _opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
         let mut decode = DecodeOptions::new();
         // Indexed output preserves the exact palette + pixels (lossless).
         decode.set_color_output(ColorOutput::Indexed);
@@ -43,7 +43,9 @@ impl Optimizer for GifOptimizer {
 
         if frames.len() != 1 {
             // Animated or empty: leave untouched.
-            return Ok(Vec::new());
+            return Ok(CandidateSet::Skipped {
+                reason: "animated or empty GIFs are left untouched".to_string(),
+            });
         }
 
         let palette = global_palette.unwrap_or_default();
@@ -56,6 +58,6 @@ impl Optimizer for GifOptimizer {
                 .map_err(|e| Error::Encode(format!("gif write: {e}")))?;
         }
 
-        Ok(vec![buf])
+        Ok(CandidateSet::Candidates(vec![buf]))
     }
 }

@@ -15,7 +15,7 @@
 
 use usvg::{Options, Tree, WriteOptions};
 
-use super::Optimizer;
+use super::{CandidateSet, Optimizer};
 use crate::error::Error;
 use crate::options::OptimizeOptions;
 
@@ -33,16 +33,22 @@ const UNSAFE_MARKERS: &[&str] = &[
 ];
 
 impl Optimizer for SvgOptimizer {
-    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<Vec<Vec<u8>>, Error> {
+    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
         let text = match std::str::from_utf8(input) {
             Ok(t) => t,
             // Not UTF-8 (e.g. gzipped .svgz): leave untouched.
-            Err(_) => return Ok(Vec::new()),
+            Err(_) => {
+                return Ok(CandidateSet::Skipped {
+                    reason: "SVG input is not UTF-8 and was left untouched".to_string(),
+                });
+            }
         };
 
         let lower = text.to_ascii_lowercase();
         if UNSAFE_MARKERS.iter().any(|m| lower.contains(m)) {
-            return Ok(Vec::new());
+            return Ok(CandidateSet::Skipped {
+                reason: "SVG contains animation, scripting, or foreignObject content".to_string(),
+            });
         }
 
         let tree = Tree::from_data(input, &Options::default())
@@ -59,7 +65,7 @@ impl Optimizer for SvgOptimizer {
         };
 
         let optimized = tree.to_string(&write_opts);
-        Ok(vec![optimized.into_bytes()])
+        Ok(CandidateSet::Candidates(vec![optimized.into_bytes()]))
     }
 
     fn validate(&self, bytes: &[u8]) -> bool {

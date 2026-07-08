@@ -19,11 +19,22 @@ mod svg;
 #[cfg(feature = "webp")]
 mod webp;
 
+/// Result of asking a codec to process an input.
+pub enum CandidateSet {
+    /// Candidate encodings for the engine to validate and compare.
+    Candidates(Vec<Vec<u8>>),
+    /// The codec intentionally left the file untouched for a non-fatal reason.
+    Skipped { reason: String },
+}
+
 /// Produces candidate re-encodings of an input image.
 pub trait Optimizer {
-    /// Return zero or more candidate encodings. An empty result means "nothing
-    /// better was produced"; the engine will then keep the original.
-    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<Vec<Vec<u8>>, Error>;
+    /// Return candidate encodings or an intentional non-fatal skip.
+    ///
+    /// Empty candidates mean "nothing better was produced"; the engine will then
+    /// keep the original as already optimal. Unsupported format features should
+    /// return [`CandidateSet::Skipped`] so CLI and JSON output can explain why.
+    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error>;
 
     /// Validate that produced bytes decode as a valid image, so the engine never
     /// writes a corrupt candidate over a good original. The default re-decodes

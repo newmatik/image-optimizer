@@ -32,4 +32,6 @@ webp = ["dep:webp"]
 svg = ["dep:usvg"]
 
 [dev-dependencies]
+gif = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "gif"] }
+webp = { workspace = true }

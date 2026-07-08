@@ -7,14 +7,14 @@
 
 use webp::Encoder;
 
-use super::Optimizer;
+use super::{CandidateSet, Optimizer};
 use crate::error::Error;
 use crate::options::OptimizeOptions;
 
 pub struct WebpOptimizer;
 
 impl Optimizer for WebpOptimizer {
-    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<Vec<Vec<u8>>, Error> {
+    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
         let decoded = webp::Decoder::new(input)
             .decode()
             .ok_or_else(|| Error::Decode("libwebp could not decode input".into()))?;
@@ -34,7 +34,7 @@ impl Optimizer for WebpOptimizer {
             out.push(encoder.encode(quality).to_vec());
         }
 
-        Ok(out)
+        Ok(CandidateSet::Candidates(out))
     }
 
     fn validate(&self, bytes: &[u8]) -> bool {

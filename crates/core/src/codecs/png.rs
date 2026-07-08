@@ -11,14 +11,14 @@
 
 use oxipng::{Options, StripChunks};
 
-use super::Optimizer;
+use super::{CandidateSet, Optimizer};
 use crate::error::Error;
 use crate::options::{MetadataPolicy, OptimizeOptions};
 
 pub struct PngOptimizer;
 
 impl Optimizer for PngOptimizer {
-    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<Vec<Vec<u8>>, Error> {
+    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
         let mut out = Vec::new();
 
         // Lossless pass. If this fails the input is not a valid PNG we can
@@ -35,7 +35,7 @@ impl Optimizer for PngOptimizer {
             }
         }
 
-        Ok(out)
+        Ok(CandidateSet::Candidates(out))
     }
 }
 

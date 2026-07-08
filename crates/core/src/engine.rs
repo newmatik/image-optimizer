@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use crate::codecs;
+use crate::codecs::{self, CandidateSet};
 use crate::error::{panic_message, Error};
 use crate::format::{detect_format, ImageFormat};
 use crate::options::OptimizeOptions;
@@ -77,8 +77,20 @@ pub fn optimize_bytes(input: &[u8], opts: &OptimizeOptions) -> Result<OptimizedI
     // Codec calls cross into C libraries (mozjpeg, libwebp, …) which report
     // errors by unwinding. Catch any unwind so one bad file can never abort the
     // process; the original is preserved.
-    let candidates = catch_unwind(AssertUnwindSafe(|| codec.candidates(input, opts)))
+    let candidate_set = catch_unwind(AssertUnwindSafe(|| codec.candidates(input, opts)))
         .map_err(|p| Error::Panicked(panic_message(p)))??;
+    let candidates = match candidate_set {
+        CandidateSet::Candidates(candidates) => candidates,
+        CandidateSet::Skipped { reason } => {
+            return Ok(OptimizedImage {
+                bytes: input.to_vec(),
+                format,
+                original_size,
+                optimized_size: original_size,
+                status: OptimizeStatus::Skipped { reason },
+            });
+        }
+    };
 
     let (bytes, status) = pick_best(
         input,

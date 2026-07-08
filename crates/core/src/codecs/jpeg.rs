@@ -16,7 +16,7 @@ use std::os::raw::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use super::Optimizer;
+use super::{CandidateSet, Optimizer};
 use crate::error::Error;
 use crate::metadata::{keep_all, keep_color_profile};
 use crate::options::OptimizeOptions;
@@ -24,7 +24,7 @@ use crate::options::OptimizeOptions;
 pub struct JpegOptimizer;
 
 impl Optimizer for JpegOptimizer {
-    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<Vec<Vec<u8>>, Error> {
+    fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
         let mut out = Vec::new();
 
         // A lossy re-encode discards ICC/EXIF/COM markers, so it may only be
@@ -43,7 +43,7 @@ impl Optimizer for JpegOptimizer {
             }
         }
 
-        if allow_lossy {
+        if allow_lossy && should_offer_lossy(input, opts) {
             match lossy_reencode(input, opts) {
                 Ok(v) => out.push(v),
                 Err(e) => {
@@ -54,7 +54,7 @@ impl Optimizer for JpegOptimizer {
             }
         }
 
-        Ok(out)
+        Ok(CandidateSet::Candidates(out))
     }
 }
 
@@ -229,6 +229,105 @@ fn lossy_reencode(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error
 }
 
 // --- helpers ---------------------------------------------------------------
+
+fn should_offer_lossy(input: &[u8], opts: &OptimizeOptions) -> bool {
+    let target = opts.quality_or(80);
+    match estimate_jpeg_quality(input) {
+        Some(source) => source > target.saturating_add(2),
+        None => true,
+    }
+}
+
+/// Estimate JPEG quality from the first luminance quantization value.
+///
+/// This is intentionally conservative and only used to avoid repeated
+/// destructive recompression in CI loops. If the source already appears to be at
+/// or below the target quality, offering a lossy candidate would likely degrade
+/// it for marginal savings.
+fn estimate_jpeg_quality(input: &[u8]) -> Option<u8> {
+    const STD_LUMA_Q00: f64 = 16.0;
+
+    let q00 = first_luma_quant_value(input)? as f64;
+    if q00 <= 0.0 {
+        return None;
+    }
+
+    let scale = (q00 * 100.0) / STD_LUMA_Q00;
+    let quality = if scale <= 100.0 {
+        (200.0 - scale) / 2.0
+    } else {
+        5000.0 / scale
+    };
+    Some(quality.round().clamp(1.0, 100.0) as u8)
+}
+
+fn first_luma_quant_value(input: &[u8]) -> Option<u16> {
+    if input.len() < 4 || input[0] != 0xFF || input[1] != 0xD8 {
+        return None;
+    }
+
+    let mut i = 2;
+    while i + 4 <= input.len() {
+        while i < input.len() && input[i] == 0xFF {
+            i += 1;
+        }
+        if i >= input.len() {
+            return None;
+        }
+        let marker = input[i];
+        i += 1;
+
+        if marker == 0xDA || marker == 0xD9 {
+            return None;
+        }
+        if matches!(marker, 0x01 | 0xD0..=0xD7) {
+            continue;
+        }
+        if i + 2 > input.len() {
+            return None;
+        }
+
+        let len = u16::from_be_bytes([input[i], input[i + 1]]) as usize;
+        if len < 2 || i + len > input.len() {
+            return None;
+        }
+        let segment = &input[i + 2..i + len];
+        if marker == 0xDB {
+            return parse_dqt_q00(segment);
+        }
+        i += len;
+    }
+    None
+}
+
+fn parse_dqt_q00(mut segment: &[u8]) -> Option<u16> {
+    while !segment.is_empty() {
+        let info = *segment.first()?;
+        let precision = info >> 4;
+        let table_id = info & 0x0F;
+        segment = &segment[1..];
+
+        let bytes_per_value = match precision {
+            0 => 1,
+            1 => 2,
+            _ => return None,
+        };
+        let table_len = 64 * bytes_per_value;
+        if segment.len() < table_len {
+            return None;
+        }
+
+        if table_id == 0 {
+            return if bytes_per_value == 1 {
+                Some(segment[0] as u16)
+            } else {
+                Some(u16::from_be_bytes([segment[0], segment[1]]))
+            };
+        }
+        segment = &segment[table_len..];
+    }
+    None
+}
 
 fn flatten(r: std::thread::Result<Result<Vec<u8>, Error>>) -> Result<Vec<u8>, Error> {
     match r {
