@@ -1,0 +1,22 @@
+[package]
+name = "imageopt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+imageopt-core = { path = "../crates/core" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "optimize_bytes"
+path = "fuzz_targets/optimize_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
