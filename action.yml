@@ -103,8 +103,10 @@ runs:
           fi
         fi
 
-        dir="$RUNNER_TEMP/imageopt"
-        mkdir -p "$dir"
+        # A fresh dir per invocation so using the action multiple times in one
+        # job never collides on the downloaded archive or extracted binary
+        # (gh release download refuses to overwrite an existing file).
+        dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/imageopt.XXXXXX")"
         pattern="imageopt-*-${target}.${archive_ext}"
         echo "Downloading $pattern from $repo ($ver)…"
         if [ "$ver" = "latest" ]; then
