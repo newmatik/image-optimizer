@@ -10,6 +10,7 @@ rediscover as the CLI, GitHub Action, and reusable engine grow.
 - [ADR-0002: Treat GitHub Releases as the Infrastructure Layer](adr/0002-github-releases-as-infrastructure.md)
 - [ADR-0003: Make Skipped Semantics Explicit](adr/0003-explicit-skipped-semantics.md)
 - [ADR-0004: Treat Repeated-Run Lossy Safety as a Core Invariant](adr/0004-repeated-run-lossy-safety.md)
+- [ADR-0005: Bound Batch Memory with an Optional In-Flight Byte Budget](adr/0005-batch-memory-budget.md)
 
 ## Roadmap
 

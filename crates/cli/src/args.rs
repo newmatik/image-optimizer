@@ -63,6 +63,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub jobs: Option<usize>,
 
+    /// Cap the combined size (in MB) of files processed at once, to bound memory
+    /// on large batches. Default: unbounded (limited only by --jobs).
+    #[arg(long, value_name = "MB")]
+    pub max_in_flight_mb: Option<u64>,
+
     /// Keep a re-encoded file even if it is larger than the original.
     #[arg(long)]
     pub keep_larger: bool,
@@ -119,6 +124,9 @@ impl Cli {
             // the first pass instead of slowly degrading. Lossless is already
             // idempotent, so it keeps any improvement (0).
             min_savings_percent: self.min_savings.unwrap_or(if lossy { 10.0 } else { 0.0 }),
+            max_in_flight_bytes: self
+                .max_in_flight_mb
+                .map(|mb| mb.saturating_mul(1024 * 1024)),
             ..Default::default()
         }
     }
@@ -147,6 +155,7 @@ mod tests {
             check: false,
             json: false,
             jobs: None,
+            max_in_flight_mb: None,
             keep_larger: false,
             quiet: false,
         }

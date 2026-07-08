@@ -48,8 +48,10 @@ Notes:
 * **Animated GIFs are left untouched** (skipped). Robust animated optimization
   needs gifsicle, which is not safe to call from the parallel engine; this is a
   planned enhancement.
-* **SVGs using SMIL animation, `<script>`, or `<foreignObject>` are left
-  untouched** so nothing is ever silently dropped.
+* **SVGs using SMIL animation, `<script>`, event handlers (`on*=`), CSS
+  animations, `<foreignObject>`, or external/`data:` `<use>` references are left
+  untouched** so nothing is ever silently dropped. Optimization normalizes and
+  reserializes the SVG (visually lossless, not byte-for-byte).
 * AVIF files are detected but left untouched until an AVIF optimizer is added.
 
 ## Install
@@ -108,6 +110,7 @@ imageopt --json assets/ > report.json
 | `--check` | CI gate: write nothing; exit non-zero if any file could be optimized. |
 | `--json` | Machine-readable JSON output. |
 | `-j, --jobs <N>` | Parallel workers (default: CPU cores). |
+| `--max-in-flight-mb <MB>` | Cap the combined size of files processed at once, to bound memory on large batches. Default: unbounded. |
 | `--keep-larger` | Keep a re-encode even if larger than the original. |
 | `--quiet` | Only print the final summary. |
 

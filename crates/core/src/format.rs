@@ -14,63 +14,97 @@ pub enum ImageFormat {
     Unknown,
 }
 
+/// Static per-format metadata. Keeping the canonical name, MIME type, and
+/// extensions for every known format in one table means adding a format (e.g.
+/// AVIF, JXL) is a single row edit instead of touching several parallel `match`
+/// arms.
+struct FormatSpec {
+    format: ImageFormat,
+    name: &'static str,
+    mime: &'static str,
+    extensions: &'static [&'static str],
+}
+
+const SPECS: &[FormatSpec] = &[
+    FormatSpec {
+        format: ImageFormat::Jpeg,
+        name: "jpeg",
+        mime: "image/jpeg",
+        extensions: &["jpg", "jpeg", "jpe", "jfif"],
+    },
+    FormatSpec {
+        format: ImageFormat::Png,
+        name: "png",
+        mime: "image/png",
+        extensions: &["png"],
+    },
+    FormatSpec {
+        format: ImageFormat::Gif,
+        name: "gif",
+        mime: "image/gif",
+        extensions: &["gif"],
+    },
+    FormatSpec {
+        format: ImageFormat::WebP,
+        name: "webp",
+        mime: "image/webp",
+        extensions: &["webp"],
+    },
+    FormatSpec {
+        format: ImageFormat::Avif,
+        name: "avif",
+        mime: "image/avif",
+        extensions: &["avif"],
+    },
+    FormatSpec {
+        format: ImageFormat::Svg,
+        name: "svg",
+        mime: "image/svg+xml",
+        extensions: &["svg"],
+    },
+];
+
 impl ImageFormat {
+    /// Every known image format (excludes [`ImageFormat::Unknown`]).
+    pub const ALL: &'static [ImageFormat] = &[
+        ImageFormat::Jpeg,
+        ImageFormat::Png,
+        ImageFormat::Gif,
+        ImageFormat::WebP,
+        ImageFormat::Avif,
+        ImageFormat::Svg,
+    ];
+
+    fn spec(self) -> Option<&'static FormatSpec> {
+        SPECS.iter().find(|s| s.format == self)
+    }
+
     /// Lowercase short name, e.g. `"jpeg"`.
     pub fn as_str(self) -> &'static str {
-        match self {
-            ImageFormat::Jpeg => "jpeg",
-            ImageFormat::Png => "png",
-            ImageFormat::Gif => "gif",
-            ImageFormat::WebP => "webp",
-            ImageFormat::Avif => "avif",
-            ImageFormat::Svg => "svg",
-            ImageFormat::Unknown => "unknown",
-        }
+        self.spec().map(|s| s.name).unwrap_or("unknown")
     }
 
     /// MIME type for the format.
     pub fn mime(self) -> &'static str {
-        match self {
-            ImageFormat::Jpeg => "image/jpeg",
-            ImageFormat::Png => "image/png",
-            ImageFormat::Gif => "image/gif",
-            ImageFormat::WebP => "image/webp",
-            ImageFormat::Avif => "image/avif",
-            ImageFormat::Svg => "image/svg+xml",
-            ImageFormat::Unknown => "application/octet-stream",
-        }
+        self.spec()
+            .map(|s| s.mime)
+            .unwrap_or("application/octet-stream")
     }
 
     /// File extensions (lowercase, no dot) commonly used for the format.
     pub fn extensions(self) -> &'static [&'static str] {
-        match self {
-            ImageFormat::Jpeg => &["jpg", "jpeg", "jpe", "jfif"],
-            ImageFormat::Png => &["png"],
-            ImageFormat::Gif => &["gif"],
-            ImageFormat::WebP => &["webp"],
-            ImageFormat::Avif => &["avif"],
-            ImageFormat::Svg => &["svg"],
-            ImageFormat::Unknown => &[],
-        }
+        self.spec().map(|s| s.extensions).unwrap_or(&[])
     }
 
     /// Best-guess format from a file extension (case-insensitive). Used only to
     /// pre-filter directory walks; real detection is content-based.
     pub fn from_extension(ext: &str) -> ImageFormat {
         let ext = ext.to_ascii_lowercase();
-        for f in [
-            ImageFormat::Jpeg,
-            ImageFormat::Png,
-            ImageFormat::Gif,
-            ImageFormat::WebP,
-            ImageFormat::Avif,
-            ImageFormat::Svg,
-        ] {
-            if f.extensions().contains(&ext.as_str()) {
-                return f;
-            }
-        }
-        ImageFormat::Unknown
+        SPECS
+            .iter()
+            .find(|s| s.extensions.contains(&ext.as_str()))
+            .map(|s| s.format)
+            .unwrap_or(ImageFormat::Unknown)
     }
 }
 
