@@ -1,5 +1,7 @@
 //! Human-readable table, summary, and JSON output.
 
+use std::collections::BTreeMap;
+
 use imageopt_core::{OptimizeResult, OptimizeStatus};
 use owo_colors::OwoColorize;
 
@@ -71,6 +73,7 @@ pub fn print_table(results: &[OptimizeResult], cli: &Cli) {
         };
         let detail = match &r.status {
             OptimizeStatus::Failed { error } => format!(" ({error})"),
+            OptimizeStatus::Skipped { reason } => format!(" ({reason})"),
             _ => String::new(),
         };
         anstream::println!(
@@ -88,64 +91,105 @@ pub fn print_table(results: &[OptimizeResult], cli: &Cli) {
 
 /// Print the aggregate summary line.
 pub fn print_summary(results: &[OptimizeResult]) {
-    let mut optimized = 0u64;
-    let mut already = 0u64;
-    let mut skipped = 0u64;
-    let mut failed = 0u64;
-    let mut total_orig = 0u64;
-    let mut total_new = 0u64;
+    let summary = summarize(results);
+    let pct = summary.saved_percent;
 
-    for r in results {
-        total_orig += r.original_size;
-        total_new += match r.status {
-            OptimizeStatus::Optimized => r.optimized_size,
-            _ => r.original_size,
-        };
-        match r.status {
-            OptimizeStatus::Optimized => optimized += 1,
-            OptimizeStatus::AlreadyOptimal => already += 1,
-            OptimizeStatus::Skipped { .. } => skipped += 1,
-            OptimizeStatus::Failed { .. } => failed += 1,
-        }
+    let mut parts = vec![format!("{} optimized", summary.optimized)];
+    if summary.already_optimal > 0 {
+        parts.push(format!("{} already-optimal", summary.already_optimal));
+    }
+    if summary.skipped > 0 {
+        parts.push(format!("{} skipped", summary.skipped));
+    }
+    if summary.failed > 0 {
+        parts.push(format!("{} failed", summary.failed));
     }
 
-    // Signed so `--keep-larger` (which can grow the total) is reported honestly.
-    let delta = total_orig as i64 - total_new as i64; // >0 saved, <0 grew
-    let pct = if total_orig > 0 {
-        delta as f64 / total_orig as f64 * 100.0
+    let change = if summary.saved_bytes >= 0 {
+        format!(
+            "-{pct:.1}%, saved {}",
+            human_size(summary.saved_bytes as u64)
+        )
+        .green()
+        .to_string()
     } else {
-        0.0
-    };
-
-    let mut parts = vec![format!("{optimized} optimized")];
-    if already > 0 {
-        parts.push(format!("{already} already-optimal"));
-    }
-    if skipped > 0 {
-        parts.push(format!("{skipped} skipped"));
-    }
-    if failed > 0 {
-        parts.push(format!("{failed} failed"));
-    }
-
-    let change = if delta >= 0 {
-        format!("-{pct:.1}%, saved {}", human_size(delta as u64))
-            .green()
-            .to_string()
-    } else {
-        format!("+{:.1}%, grew {}", -pct, human_size((-delta) as u64))
-            .red()
-            .to_string()
+        format!(
+            "+{:.1}%, grew {}",
+            -pct,
+            human_size((-summary.saved_bytes) as u64)
+        )
+        .red()
+        .to_string()
     };
 
     anstream::println!(
         "\n{}  {}  {} → {}  ({})",
         "TOTAL".bold(),
         parts.join(", "),
-        human_size(total_orig),
-        human_size(total_new),
+        human_size(summary.original_size),
+        human_size(summary.optimized_size),
         change,
     );
+}
+
+#[derive(Clone, Debug)]
+struct Summary {
+    total: u64,
+    optimized: u64,
+    already_optimal: u64,
+    skipped: u64,
+    failed: u64,
+    original_size: u64,
+    optimized_size: u64,
+    saved_bytes: i64,
+    saved_percent: f64,
+    elapsed_ms: u64,
+    formats: BTreeMap<String, u64>,
+}
+
+fn summarize(results: &[OptimizeResult]) -> Summary {
+    let mut summary = Summary {
+        total: results.len() as u64,
+        optimized: 0,
+        already_optimal: 0,
+        skipped: 0,
+        failed: 0,
+        original_size: 0,
+        optimized_size: 0,
+        saved_bytes: 0,
+        saved_percent: 0.0,
+        elapsed_ms: 0,
+        formats: BTreeMap::new(),
+    };
+
+    for r in results {
+        summary.original_size += r.original_size;
+        summary.optimized_size += match r.status {
+            OptimizeStatus::Optimized => r.optimized_size,
+            _ => r.original_size,
+        };
+        summary.elapsed_ms += r.elapsed.as_millis() as u64;
+        *summary
+            .formats
+            .entry(r.format.as_str().to_string())
+            .or_default() += 1;
+
+        match r.status {
+            OptimizeStatus::Optimized => summary.optimized += 1,
+            OptimizeStatus::AlreadyOptimal => summary.already_optimal += 1,
+            OptimizeStatus::Skipped { .. } => summary.skipped += 1,
+            OptimizeStatus::Failed { .. } => summary.failed += 1,
+        }
+    }
+
+    // Signed so `--keep-larger` (which can grow the total) is reported honestly.
+    summary.saved_bytes = summary.original_size as i64 - summary.optimized_size as i64;
+    summary.saved_percent = if summary.original_size > 0 {
+        summary.saved_bytes as f64 / summary.original_size as f64 * 100.0
+    } else {
+        0.0
+    };
+    summary
 }
 
 /// Print results as a JSON array (one object per file).
@@ -181,7 +225,23 @@ pub fn print_json(results: &[OptimizeResult]) {
         })
         .collect();
 
-    let out = serde_json::json!({ "results": items });
+    let summary = summarize(results);
+    let out = serde_json::json!({
+        "summary": {
+            "total": summary.total,
+            "optimized": summary.optimized,
+            "already_optimal": summary.already_optimal,
+            "skipped": summary.skipped,
+            "failed": summary.failed,
+            "original_size": summary.original_size,
+            "optimized_size": summary.optimized_size,
+            "saved_bytes": summary.saved_bytes,
+            "saved_percent": (summary.saved_percent * 100.0).round() / 100.0,
+            "elapsed_ms": summary.elapsed_ms,
+            "formats": summary.formats,
+        },
+        "results": items,
+    });
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
 }
 

@@ -128,3 +128,61 @@ impl Cli {
         !self.check && !self.dry_run
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli_with(lossy: bool, quality: Option<u8>, min_savings: Option<f64>) -> Cli {
+        Cli {
+            paths: vec!["assets".to_string()],
+            recursive: false,
+            lossy,
+            quality,
+            png_level: 3,
+            min_savings,
+            strip: None,
+            dry_run: false,
+            backup: false,
+            check: false,
+            json: false,
+            jobs: None,
+            keep_larger: false,
+            quiet: false,
+        }
+    }
+
+    #[test]
+    fn lossy_defaults_to_threshold_that_converges_in_ci() {
+        let opts = cli_with(true, None, None).to_options();
+
+        assert!(opts.lossy);
+        assert_eq!(opts.min_savings_percent, 10.0);
+        assert_eq!(opts.metadata, MetadataPolicy::StripAll);
+    }
+
+    #[test]
+    fn quality_implies_lossy_and_uses_same_convergence_threshold() {
+        let opts = cli_with(false, Some(80), None).to_options();
+
+        assert!(opts.lossy);
+        assert_eq!(opts.quality, Some(80));
+        assert_eq!(opts.min_savings_percent, 10.0);
+    }
+
+    #[test]
+    fn explicit_min_savings_overrides_lossy_default() {
+        let opts = cli_with(true, None, Some(0.0)).to_options();
+
+        assert_eq!(opts.min_savings_percent, 0.0);
+    }
+
+    #[test]
+    fn lossless_keeps_any_improvement_by_default() {
+        let opts = cli_with(false, None, None).to_options();
+
+        assert!(!opts.lossy);
+        assert_eq!(opts.min_savings_percent, 0.0);
+        assert_eq!(opts.metadata, MetadataPolicy::KeepColorProfile);
+    }
+}

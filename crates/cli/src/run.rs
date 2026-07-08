@@ -61,13 +61,14 @@ fn should_consider(path: &Path) -> bool {
 
 fn collect_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
     let max_depth = if recursive { usize::MAX } else { 1 };
-    for entry in WalkDir::new(dir)
-        .max_depth(max_depth)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if entry.file_type().is_file() && should_consider(entry.path()) {
-            push_unique(entry.into_path(), out, seen);
+    for entry in WalkDir::new(dir).max_depth(max_depth) {
+        match entry {
+            Ok(entry) => {
+                if entry.file_type().is_file() && should_consider(entry.path()) {
+                    push_unique(entry.into_path(), out, seen);
+                }
+            }
+            Err(e) => eprintln!("imageopt: skipped walk entry: {e}"),
         }
     }
 }
@@ -76,12 +77,20 @@ fn collect_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>, seen: &mut H
 fn collect_glob(pattern: &str, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
     let glob = match Glob::new(pattern) {
         Ok(g) => g.compile_matcher(),
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("imageopt: invalid glob `{pattern}`: {e}");
+            return;
+        }
     };
     let root = glob_root(pattern);
-    for entry in WalkDir::new(&root).into_iter().filter_map(Result::ok) {
-        if entry.file_type().is_file() && glob.is_match(entry.path()) {
-            push_unique(entry.into_path(), out, seen);
+    for entry in WalkDir::new(&root) {
+        match entry {
+            Ok(entry) => {
+                if entry.file_type().is_file() && glob.is_match(entry.path()) {
+                    push_unique(entry.into_path(), out, seen);
+                }
+            }
+            Err(e) => eprintln!("imageopt: skipped walk entry: {e}"),
         }
     }
 }
