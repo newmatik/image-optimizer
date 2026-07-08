@@ -23,9 +23,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p smoke-assets
+          # Redundant coordinate precision and stroke width so the SVG minifier
+          # has something to shrink; a trivially-minimal SVG would already be
+          # optimal and would make check mode (correctly) pass, breaking the
+          # assertion below.
           cat > smoke-assets/optimizable.svg <<'SVG'
-          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-            <rect width="10" height="10" fill="red" />
+          <svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+            <path d="M 10.000000 10.000000 L 190.000000 10.000000 L 190.000000 190.000000 L 10.000000 190.000000 Z" fill="blue" stroke="black" stroke-width="1.0000000"/>
           </svg>
           SVG
           cp smoke-assets/optimizable.svg smoke-assets/dry-run.svg
