@@ -64,6 +64,49 @@ fn make_webp() -> Vec<u8> {
     webp::Encoder::from_rgba(&rgba, w, h).encode(95.0).to_vec()
 }
 
+/// A minimal animated WebP: a RIFF/WEBP container whose VP8X flags byte sets the
+/// animation bit and which carries an ANIM chunk. It need not hold real frame
+/// data — the engine must refuse to touch it before decoding.
+fn make_animated_webp() -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&[0, 0, 0, 0]); // RIFF size placeholder (patched below)
+    b.extend_from_slice(b"WEBP");
+    // VP8X chunk (10-byte payload): flags byte with the animation bit, 3 reserved
+    // bytes, then 24-bit canvas width-1 and height-1 (little-endian).
+    b.extend_from_slice(b"VP8X");
+    b.extend_from_slice(&10u32.to_le_bytes());
+    b.push(0x02); // animation flag
+    b.extend_from_slice(&[0, 0, 0]); // reserved
+    b.extend_from_slice(&[0x0f, 0, 0]); // width - 1 = 15 -> 16px
+    b.extend_from_slice(&[0x0f, 0, 0]); // height - 1 = 15 -> 16px
+                                        // ANIM chunk (6-byte payload): background color + loop count.
+    b.extend_from_slice(b"ANIM");
+    b.extend_from_slice(&6u32.to_le_bytes());
+    b.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    let size = (b.len() - 8) as u32;
+    b[4..8].copy_from_slice(&size.to_le_bytes());
+    b
+}
+
+/// A still (non-animated) VP8X WebP header advertising a huge canvas, used to
+/// exercise the decompression-bomb guard's WebP fallback probe.
+fn make_huge_webp_header() -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&[0, 0, 0, 0]);
+    b.extend_from_slice(b"WEBP");
+    b.extend_from_slice(b"VP8X");
+    b.extend_from_slice(&10u32.to_le_bytes());
+    b.push(0x00); // no animation flag
+    b.extend_from_slice(&[0, 0, 0]); // reserved
+    b.extend_from_slice(&[0xff, 0xff, 0xff]); // width - 1 = ~16.7M
+    b.extend_from_slice(&[0xff, 0xff, 0xff]); // height - 1 = ~16.7M
+    let size = (b.len() - 8) as u32;
+    b[4..8].copy_from_slice(&size.to_le_bytes());
+    b
+}
+
 fn make_static_gif() -> Vec<u8> {
     let mut buf = Vec::new();
     {
@@ -157,6 +200,26 @@ fn webp_lossy_path_produces_valid_output_or_keeps_original() {
     assert!(
         webp::Decoder::new(&out.bytes).decode().is_some(),
         "WebP result must decode through libwebp"
+    );
+}
+
+#[test]
+fn animated_webp_is_reported_as_skipped_not_flattened() {
+    let input = make_animated_webp();
+    let out = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
+
+    match out.status {
+        OptimizeStatus::Skipped { reason } => {
+            assert!(
+                reason.to_lowercase().contains("webp"),
+                "unexpected skip reason: {reason}"
+            );
+        }
+        other => panic!("expected skipped animated WebP, got {other:?}"),
+    }
+    assert_eq!(
+        out.bytes, input,
+        "animated WebP must be returned verbatim, never flattened to one frame"
     );
 }
 
@@ -268,6 +331,40 @@ fn unsafe_svg_is_reported_as_skipped_not_already_optimal() {
 }
 
 #[test]
+fn svg_with_css_animation_is_skipped() {
+    let input = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+        <style>@keyframes spin { to { transform: rotate(360deg); } }
+        rect { animation: spin 2s linear infinite; }</style>
+        <rect width="10" height="10" fill="red" />
+      </svg>"#
+        .to_vec();
+    let out = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
+
+    assert!(
+        matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "CSS-animated SVG must be skipped, got {:?}",
+        out.status
+    );
+    assert_eq!(out.bytes, input, "skipped SVG must be returned verbatim");
+}
+
+#[test]
+fn svg_with_event_handler_is_skipped() {
+    let input = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+        <rect width="10" height="10" fill="red" onfocus="steal()" />
+      </svg>"#
+        .to_vec();
+    let out = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
+
+    assert!(
+        matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "SVG with an event handler must be skipped, got {:?}",
+        out.status
+    );
+    assert_eq!(out.bytes, input, "skipped SVG must be returned verbatim");
+}
+
+#[test]
 fn corrupt_jpeg_fails_without_panicking() {
     // Valid JPEG magic bytes followed by garbage.
     let mut input = vec![0xFF, 0xD8, 0xFF, 0xE0];
@@ -302,6 +399,32 @@ fn dry_run_leaves_file_untouched_inplace_writes_smaller() {
     let new_len = std::fs::metadata(&path).unwrap().len();
     assert!(new_len < original_len, "{new_len} !< {original_len}");
     assert!(image::load_from_memory(&std::fs::read(&path).unwrap()).is_ok());
+}
+
+#[test]
+fn directory_sink_writes_to_dest_and_leaves_source_untouched() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let out_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("img.png");
+    let input = make_png();
+    std::fs::write(&src, &input).unwrap();
+
+    let dst = out_dir.path().join("img.png");
+    let r = optimize_file(
+        &src,
+        &OptimizeOptions::default(),
+        &OutputSink::Directory {
+            root: out_dir.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(r.status, OptimizeStatus::Optimized);
+    // Source is untouched.
+    assert_eq!(std::fs::read(&src).unwrap(), input);
+    // Destination holds the optimized (smaller, valid) image.
+    let written = std::fs::read(&dst).unwrap();
+    assert!(written.len() < input.len(), "destination must be smaller");
+    assert!(image::load_from_memory(&written).is_ok());
 }
 
 #[test]
@@ -366,6 +489,32 @@ fn optimize_paths_preserves_input_order_and_reports_progress() {
 }
 
 #[test]
+fn in_flight_byte_budget_still_processes_all_files_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for i in 0..5 {
+        let p = dir.path().join(format!("img{i}.png"));
+        std::fs::write(&p, make_png()).unwrap();
+        paths.push(p);
+    }
+
+    // A budget far smaller than any single file forces fully serialized admission
+    // (each file is admitted alone). This must not deadlock and must still
+    // optimize every file, preserving input order.
+    let opts = OptimizeOptions {
+        max_in_flight_bytes: Some(1),
+        ..Default::default()
+    };
+    let results = optimize_paths(&paths, &opts, &OutputSink::DryRun, |_| {});
+
+    assert_eq!(results.len(), paths.len());
+    for (r, p) in results.iter().zip(&paths) {
+        assert_eq!(r.source.as_ref(), Some(p), "order must be preserved");
+        assert_eq!(r.status, OptimizeStatus::Optimized);
+    }
+}
+
+#[test]
 fn rejects_images_over_pixel_limit() {
     let input = make_png(); // 128x128 = 16384 px
     let opts = OptimizeOptions {
@@ -378,6 +527,19 @@ fn rejects_images_over_pixel_limit() {
             assert_eq!(limit, 1024);
         }
         other => panic!("expected TooLarge, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_webp_over_pixel_limit_via_header_probe() {
+    // The `image` crate cannot always read a VP8X header; the engine's WebP
+    // fallback probe must still enforce the pixel budget before any decode.
+    let input = make_huge_webp_header();
+    match optimize_bytes(&input, &OptimizeOptions::default()) {
+        Err(Error::TooLarge { limit, .. }) => {
+            assert_eq!(limit, OptimizeOptions::default().max_pixels);
+        }
+        other => panic!("expected TooLarge for oversized WebP, got {other:?}"),
     }
 }
 

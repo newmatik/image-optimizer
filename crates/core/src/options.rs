@@ -43,6 +43,14 @@ pub struct OptimizeOptions {
     /// that would otherwise let lossy re-encoders slowly degrade an image across
     /// runs (e.g. in a CI commit-back loop). See [`crate::engine::optimize_bytes`].
     pub min_savings_percent: f64,
+    /// Optional soft cap on the total size of input files processed
+    /// concurrently by [`crate::engine::optimize_paths`]. `None` (default) means
+    /// unbounded: parallelism is limited only by the thread pool. Setting a
+    /// value throttles how many large files decode at once so a batch of big
+    /// images does not exhaust memory on a constrained runner. A single file
+    /// larger than the budget is still processed alone (the budget never
+    /// deadlocks). Ignored by the single-file entry points.
+    pub max_in_flight_bytes: Option<u64>,
 }
 
 impl Default for OptimizeOptions {
@@ -55,6 +63,7 @@ impl Default for OptimizeOptions {
             keep_larger: false,
             max_pixels: 16_384 * 16_384,
             min_savings_percent: 0.0,
+            max_in_flight_bytes: None,
         }
     }
 }

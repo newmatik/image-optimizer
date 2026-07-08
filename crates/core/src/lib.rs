@@ -32,18 +32,13 @@ pub use format::{detect_format, ImageFormat};
 pub use options::{MetadataPolicy, OptimizeOptions};
 pub use result::{OptimizeResult, OptimizeStatus, OptimizedImage};
 
-/// Formats this build can optimize, given the enabled cargo features.
-pub fn supported_formats() -> &'static [ImageFormat] {
-    &[
-        #[cfg(feature = "jpeg")]
-        ImageFormat::Jpeg,
-        #[cfg(feature = "png")]
-        ImageFormat::Png,
-        #[cfg(feature = "gif")]
-        ImageFormat::Gif,
-        #[cfg(feature = "webp")]
-        ImageFormat::WebP,
-        #[cfg(feature = "svg")]
-        ImageFormat::Svg,
-    ]
+/// Formats this build can optimize, given the enabled cargo features. Derived
+/// from the codec registry so it never drifts from what [`codecs::codec_for`]
+/// actually dispatches.
+pub fn supported_formats() -> Vec<ImageFormat> {
+    ImageFormat::ALL
+        .iter()
+        .copied()
+        .filter(|&f| codecs::codec_for(f).is_some())
+        .collect()
 }

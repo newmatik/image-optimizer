@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -21,6 +22,13 @@ pub enum OutputSink {
     /// Overwrite the original file atomically. When `backup` is set, the
     /// original is first copied to `<name>.orig`.
     InPlace { backup: bool },
+    /// Write results into `root`, leaving the source untouched. Each file is
+    /// written to `root/<file_name>` (creating `root` if needed), so callers
+    /// flattening multiple source directories must ensure file names are unique.
+    /// Unlike [`OutputSink::InPlace`], every non-failed file is written
+    /// (optimized where possible, otherwise the original bytes) so the
+    /// destination is a complete copy of the batch.
+    Directory { root: PathBuf },
     /// Compute results but write nothing.
     DryRun,
 }
@@ -150,12 +158,65 @@ fn pick_best(
 
 /// Read pixel dimensions from the image header without a full decode (best
 /// effort; returns `None` for formats whose header we cannot cheaply parse).
+///
+/// The `image` crate handles most raster formats, but it cannot always read a
+/// WebP header (notably extended/animated WebP), which would leave the
+/// decompression-bomb guard blind before the codec performs a full decode. We
+/// fall back to a direct WebP header probe so `max_pixels` is enforced there
+/// too.
 fn pixel_dimensions(input: &[u8]) -> Option<(u32, u32)> {
-    image::ImageReader::new(std::io::Cursor::new(input))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()
+    if let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(input)).with_guessed_format() {
+        if let Ok(dims) = reader.into_dimensions() {
+            return Some(dims);
+        }
+    }
+    webp_dimensions(input)
+}
+
+/// Parse the canvas dimensions of a RIFF/WebP file from its header, covering the
+/// simple lossy (`VP8 `), simple lossless (`VP8L`), and extended (`VP8X`)
+/// layouts. Returns `None` if the bytes are not a WebP we can measure.
+fn webp_dimensions(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 16 || &b[0..4] != b"RIFF" || &b[8..12] != b"WEBP" {
+        return None;
+    }
+    match &b[12..16] {
+        b"VP8X" => {
+            // Flags (1) + reserved (3) then 24-bit width-1 and height-1 (LE).
+            if b.len() < 30 {
+                return None;
+            }
+            let w = u24_le(&b[24..27]) + 1;
+            let h = u24_le(&b[27..30]) + 1;
+            Some((w, h))
+        }
+        b"VP8L" => {
+            // Data starts at 20; first byte is the 0x2f signature, then a
+            // packed 14-bit width-1 and 14-bit height-1.
+            if b.len() < 25 || b[20] != 0x2f {
+                return None;
+            }
+            let bits = u32::from_le_bytes([b[21], b[22], b[23], b[24]]);
+            let w = (bits & 0x3FFF) + 1;
+            let h = ((bits >> 14) & 0x3FFF) + 1;
+            Some((w, h))
+        }
+        b"VP8 " => {
+            // Data starts at 20; 3-byte frame tag, then the start code
+            // 0x9d 0x01 0x2a, then 14-bit width and height (LE).
+            if b.len() < 30 || b[23] != 0x9d || b[24] != 0x01 || b[25] != 0x2a {
+                return None;
+            }
+            let w = u16::from_le_bytes([b[26], b[27]]) as u32 & 0x3FFF;
+            let h = u16::from_le_bytes([b[28], b[29]]) as u32 & 0x3FFF;
+            Some((w, h))
+        }
+        _ => None,
+    }
+}
+
+fn u24_le(b: &[u8]) -> u32 {
+    b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16
 }
 
 /// Optimize a single file according to `sink`. Never panics.
@@ -208,16 +269,36 @@ pub fn optimize_file(path: &Path, opts: &OptimizeOptions, sink: &OutputSink) -> 
         )
     };
 
-    // Persist only when we actually have a smaller, validated output.
-    if matches!(out.status, OptimizeStatus::Optimized) {
-        if let OutputSink::InPlace { backup } = sink {
-            if *backup {
-                if let Err(e) = backup_original(path) {
-                    return fail(format!("backup failed: {e}"));
+    match sink {
+        OutputSink::DryRun => {}
+        // In-place: persist only when we produced a smaller, validated output.
+        OutputSink::InPlace { backup } => {
+            if matches!(out.status, OptimizeStatus::Optimized) {
+                if *backup {
+                    if let Err(e) = backup_original(path) {
+                        return fail(format!("backup failed: {e}"));
+                    }
+                }
+                if let Err(e) = atomic_write(path, &out.bytes) {
+                    return fail(format!("write failed: {e}"));
                 }
             }
-            if let Err(e) = atomic_write(path, &out.bytes) {
-                return fail(format!("write failed: {e}"));
+        }
+        // Directory: write every non-failed file so the destination is a
+        // complete copy (optimized bytes where possible, else the original).
+        OutputSink::Directory { root } => {
+            if !matches!(out.status, OptimizeStatus::Failed { .. }) {
+                let file_name = match path.file_name() {
+                    Some(n) => n,
+                    None => return fail("source path has no file name".to_string()),
+                };
+                let dst = root.join(file_name);
+                if let Err(e) = fs::create_dir_all(root) {
+                    return fail(format!("create output dir failed: {e}"));
+                }
+                if let Err(e) = atomic_write(&dst, &out.bytes) {
+                    return fail(format!("write failed: {e}"));
+                }
             }
         }
     }
@@ -232,8 +313,52 @@ pub fn optimize_file(path: &Path, opts: &OptimizeOptions, sink: &OutputSink) -> 
     )
 }
 
+/// A counting semaphore over a byte budget. Workers acquire an amount before
+/// processing a file and release it afterwards, so the total size of files in
+/// flight stays under the budget. An acquire request is clamped to the whole
+/// budget, so a single oversized file is always eventually admitted (alone)
+/// rather than deadlocking.
+struct ByteSemaphore {
+    budget: u64,
+    available: Mutex<u64>,
+    ready: Condvar,
+}
+
+impl ByteSemaphore {
+    fn new(budget: u64) -> Self {
+        ByteSemaphore {
+            budget,
+            available: Mutex::new(budget),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Reserve `want` bytes (clamped to at least 1 and at most the whole
+    /// budget), blocking until they are available. Returns the amount reserved,
+    /// which must be passed back to [`ByteSemaphore::release`].
+    fn acquire(&self, want: u64) -> u64 {
+        let want = want.clamp(1, self.budget);
+        let mut available = self.available.lock().unwrap();
+        while *available < want {
+            available = self.ready.wait(available).unwrap();
+        }
+        *available -= want;
+        want
+    }
+
+    fn release(&self, amount: u64) {
+        let mut available = self.available.lock().unwrap();
+        *available += amount;
+        self.ready.notify_all();
+    }
+}
+
 /// Optimize many paths in parallel (via rayon), preserving input order in the
 /// returned vector. `progress` is invoked as work starts and finishes.
+///
+/// When [`OptimizeOptions::max_in_flight_bytes`] is set, the combined size of
+/// files being processed concurrently is throttled to that budget so a batch of
+/// large images does not exhaust memory.
 pub fn optimize_paths<F>(
     paths: &[PathBuf],
     opts: &OptimizeOptions,
@@ -244,6 +369,12 @@ where
     F: Fn(ProgressEvent) + Sync + Send,
 {
     let total = paths.len();
+    let budget = opts
+        .max_in_flight_bytes
+        .filter(|b| *b > 0)
+        .map(ByteSemaphore::new);
+    let budget = budget.as_ref();
+
     let mut indexed: Vec<(usize, OptimizeResult)> = paths
         .par_iter()
         .enumerate()
@@ -253,7 +384,16 @@ where
                 total,
                 name: path.display().to_string(),
             });
+            // Throttle on the file's on-disk size (a proxy for its memory cost)
+            // when a budget is configured.
+            let permit = budget.map(|sem| {
+                let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                sem.acquire(size)
+            });
             let res = optimize_file(path, opts, sink);
+            if let (Some(sem), Some(amount)) = (budget, permit) {
+                sem.release(amount);
+            }
             progress(ProgressEvent::Finished { index, total });
             (index, res)
         })
