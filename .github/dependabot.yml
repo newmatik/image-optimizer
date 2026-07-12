@@ -31,3 +31,9 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+    ignore:
+      # dtolnay/rust-toolchain is pinned to the MSRV from Cargo.toml (rust-version), not to
+      # an action release. Dependabot reads that pin as an action tag and "bumps" it to a
+      # Rust version that does not exist (it proposed 1.100.0), which both breaks the job and
+      # defeats the point of the MSRV gate. The pin moves when the MSRV moves — by hand.
+      - dependency-name: "dtolnay/rust-toolchain"
