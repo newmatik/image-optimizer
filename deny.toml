@@ -8,6 +8,9 @@ ignore = [
   # at the time of writing; keep this visible so it can be removed when usvg
   # moves to a maintained font parser stack.
   "RUSTSEC-2026-0192",
+  # Same chain: rustybuzz is now flagged unmaintained. usvg 0.47 pins it, so there is
+  # nothing to upgrade to. Drop this together with the line above when usvg moves off it.
+  "RUSTSEC-2026-0206",
 ]
 
 [licenses]
