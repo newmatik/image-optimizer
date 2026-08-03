@@ -93,7 +93,7 @@ jobs:
           key: supply-chain
 
       - name: Install supply-chain tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-audit,cargo-deny
 
@@ -122,7 +122,7 @@ jobs:
           key: coverage
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-llvm-cov
 
