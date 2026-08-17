@@ -27,7 +27,7 @@ webp = "0.3"
 # safe to call concurrently (global state, exit()). We use the thread-safe
 # pure-Rust `gif` crate (lossless) + `imagequant` (lossy) instead.
 gif = "0.14"
-usvg = "0.47"
+usvg = "0.48"
 rgb = "0.8"
 
 # --- engine support ---
