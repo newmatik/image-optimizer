@@ -1,80 +1,30 @@
-# image-optimizer (`imageopt`)
+# imageopt
 
-A fast, reliable, **cross-platform** image optimizer in the spirit of
-[ImageOptim](https://imageoptim.com/) — but it runs anywhere (Linux, macOS,
-Windows) as a single self-contained binary, with **no runtime dependencies** and
-**no external tools to install**.
+Cross-platform image optimizer (JPEG, PNG, WebP, SVG, static GIF). One
+self-contained binary, no runtime codec tools. Lossless by default; writes
+atomically and never replaces a file with a larger or undecodable result.
 
-It strips junk and recompresses images to the smallest valid output, reports how
-much space was saved, and is designed to drop straight into **CI/CD pipelines**
-(there's a ready-made GitHub Action).
+Use it locally or as a CI gate / commit-back step. A composite GitHub Action
+downloads the matching release binary.
 
-```
-FILE          FORMAT  ORIGINAL   NEW        SAVED    STATUS
-hero.png      png     625.7 KB   822 B      99.9%    optimized
-photo.jpg     jpeg    14.7 KB    9.6 KB     34.6%    optimized
-icon.svg      svg     383 B      327 B      14.6%    optimized
-image.webp    webp    1.5 KB     694 B      53.6%    optimized
-static.gif    gif     1.9 KB     1.7 KB     7.7%     optimized
-─────────────────────────────────────────────────────────────
-TOTAL  5 optimized   644.0 KB → 13.1 KB  (-98.0%, saved 630.9 KB)
-```
+## Quickstart
 
-## Why
-
-* **One binary, everywhere.** All codecs (mozjpeg, oxipng, libimagequant,
-  libwebp) are compiled in. Nothing to `apt install` at runtime, no Node, no
-  Python, no shelling out.
-* **Never corrupts or enlarges a file.** Every re-encode is validated by
-  re-decoding it before it's written, the smallest valid result wins, and files
-  are written atomically (temp file → fsync → rename). If nothing smaller can be
-  made, the original is left exactly as-is.
-* **Lossless by default**, opt-in lossy (`--lossy`) for much smaller files.
-* **Parallel.** Files are optimized across all CPU cores.
-
-## Supported formats
-
-| Format | Lossless (default) | Lossy (`--lossy`) | Engine |
-|--------|:---:|:---:|--------|
-| JPEG | ✅ jpegtran-style coefficient re-optimization (progressive, optimized Huffman) | ✅ re-encode at quality | mozjpeg |
-| PNG  | ✅ IDAT recompress + reductions (+Zopfli at `--png-level 6`) | ✅ palette quantization | oxipng + libimagequant |
-| WebP | ✅ lossless re-encode | ✅ re-encode at quality | libwebp |
-| SVG  | ✅ normalize + minify (text preserved) | ✅ reduced coordinate precision | usvg/resvg |
-| GIF  | ✅ static GIFs re-encoded losslessly | — | gif (pure Rust) |
-
-Notes:
-* **JPEG lossless is truly lossless** — the DCT coefficients are re-written, so
-  pixels are bit-for-bit identical.
-* **Animated GIFs are left untouched** (skipped). Robust animated optimization
-  needs gifsicle, which is not safe to call from the parallel engine; this is a
-  planned enhancement.
-* **SVGs using SMIL animation, `<script>`, event handlers (`on*=`), CSS
-  animations, `<foreignObject>`, or external/`data:` `<use>` references are left
-  untouched** so nothing is ever silently dropped. Optimization normalizes and
-  reserializes the SVG (visually lossless, not byte-for-byte).
-* AVIF files are detected but left untouched until an AVIF optimizer is added.
-
-## Install
-
-### Prebuilt binaries
-
-Download the archive for your platform from the
-[Releases](https://github.com/newmatik/image-optimizer/releases) page, extract,
-and put `imageopt` on your `PATH`. Targets: macOS (arm64, x64), Linux (x64,
-arm64), Windows (x64).
-
-### From source
-
-Requires a Rust toolchain plus a C toolchain with **nasm** and **cmake** (needed
-to build mozjpeg/libwebp):
+Build requires a Rust toolchain (MSRV **1.82**), a C compiler, **nasm**, and
+**cmake** (mozjpeg and libwebp compile from source):
 
 ```bash
 # macOS:    brew install nasm cmake
 # Ubuntu:   sudo apt-get install -y nasm cmake
-# Windows:  choco install nasm cmake   (use the MSVC toolchain)
+# Windows:  choco install nasm cmake   (MSVC toolchain)
 
-cargo install --path crates/cli   # or: cargo build --release
+cargo build --release
+./target/release/imageopt --dry-run assets/
 ```
+
+Or install the CLI: `cargo install --path crates/cli`
+
+Prebuilt binaries: [Releases](https://github.com/newmatik/image-optimizer/releases)
+(macOS arm64/x64, Linux x64/arm64, Windows x64).
 
 ## Usage
 
@@ -82,78 +32,68 @@ cargo install --path crates/cli   # or: cargo build --release
 imageopt [PATHS...] [OPTIONS]
 ```
 
-`PATHS` can be files, directories, or glob patterns.
+`PATHS` are files, directories, or globs (quote globs so the tool expands them).
 
 ```bash
-imageopt logo.png photo.jpg          # optimize specific files in place
-imageopt assets/                     # every image in a directory
-imageopt -r assets/                  # …and all subdirectories
-imageopt "src/**/*.{png,jpg}"        # glob (quote so the tool expands it)
-imageopt --dry-run assets/           # preview savings, change nothing
+imageopt logo.png photo.jpg          # in-place
+imageopt assets/                     # image files in that directory
+imageopt -r assets/                  # …and subdirectories
+imageopt "src/**/*.{png,jpg}"        # recursive glob
+imageopt --dry-run assets/           # preview, write nothing
+imageopt --check assets/             # CI: exit 1 if anything could shrink
 imageopt --lossy -q 75 photos/       # lossy, quality 75
 imageopt --backup logo.png           # keep logo.png.orig
 imageopt --json assets/ > report.json
 ```
 
-### Options
+In-place is the default. `--dry-run` / `--check` write nothing.
 
 | Flag | Description |
 |------|-------------|
-| `-r, --recursive` | Recurse into subdirectories. |
+| `-r, --recursive` | Recurse into subdirectories (directory args only; use `**` in globs). |
 | `--lossy` | Allow lossy recompression. |
-| `-q, --quality <1-100>` | Quality for lossy encoders (implies `--lossy`). |
-| `--png-level <0-6>` | oxipng effort; 6 enables Zopfli (slowest). Default 3. |
-| `--min-savings <PERCENT>` | Only rewrite a file if it shrinks by at least this much. Default 0 (lossless) / 10 (`--lossy`); see the idempotency note. |
-| `--strip <all\|color\|none>` | Metadata: strip all, keep ICC color profile, or keep everything. Default: keep the color profile — but with `--lossy` the default becomes `all` (see note). |
-| `--dry-run` | Report what would change without modifying files. |
-| `--backup` | Copy each original to `<name>.orig` before overwriting. |
-| `--check` | CI gate: write nothing; exit non-zero if any file could be optimized. |
-| `--json` | Machine-readable JSON output. |
+| `-q, --quality <1-100>` | Lossy quality (implies `--lossy`). |
+| `--png-level <0-6>` | oxipng effort; 6 enables Zopfli. Default 3. |
+| `--min-savings <PERCENT>` | Rewrite only if savings ≥ this. Default 0 (lossless) / 10 (`--lossy`). |
+| `--strip <all\|color\|none>` | Metadata: strip all, keep ICC, or keep everything. Default: keep ICC — with `--lossy`, default becomes `all`. |
+| `--dry-run` | Report only. |
+| `--backup` | Copy original to `<name>.orig` once (never clobber an existing backup). |
+| `--check` | Write nothing; exit 1 if any file could be optimized or failed. |
+| `--json` | Machine-readable report (stdout). |
 | `-j, --jobs <N>` | Parallel workers (default: CPU cores). |
-| `--max-in-flight-mb <MB>` | Cap the combined size of files processed at once, to bound memory on large batches. Default: unbounded. |
-| `--keep-larger` | Keep a re-encode even if larger than the original. |
-| `--quiet` | Only print the final summary. |
+| `--max-in-flight-mb <MB>` | Cap combined size of files decoded at once. Default: unbounded. |
+| `--keep-larger` | Keep a re-encode even if larger. |
+| `--quiet` | Summary only. |
 
-By default `imageopt` **optimizes files in place** (writes are atomic). Use
-`--dry-run` to preview or `--backup` to keep originals.
+Directory walks only pick known image extensions. Pass a file or glob to
+optimize an extensionless / oddly named image. Shallow globs (`*.png`) do not
+walk nested directories; use `**` for that.
 
-> **Lossy and metadata:** lossy re-encoders (JPEG/PNG/WebP) rebuild the image
-> from pixels and cannot preserve an embedded ICC profile, so `--lossy` defaults
-> to stripping all metadata. If you pass `--strip color`/`--strip none` together
-> with `--lossy`, the metadata policy is honored and those files fall back to
-> lossless optimization (the lossy candidate is skipped). SVG `--lossy` only
-> reduces coordinate precision and is unaffected.
+### Idempotency
 
-### Idempotency (safe to re-run)
+**Lossless** is deterministic: a candidate is written only if it is strictly
+smaller, so a second run reports `already optimal`.
 
-**Lossless optimization is deterministic and idempotent**: the transforms are
-exact, and a candidate is only written if it's *strictly smaller* than the
-current file, so the second run on the same files finds nothing to do (`already
-optimal`) and never rewrites or degrades them. Safe to run on every CI push.
-
-**Lossy** re-encoding, by contrast, can shave a sliver on *every* run, which
-would slowly degrade an image across repeated runs. To prevent that, `--lossy`
-defaults `--min-savings` to **10%**: after the first pass, re-encoding no longer
-clears the threshold, so the file is left untouched — lossy becomes effectively
-idempotent (it converges after one pass). Pass `--min-savings 0` to squeeze every
-last byte, but don't do that in a repeated commit-back workflow.
-
-This matters most in CI. If you run `imageopt` on every push, prefer lossless
-mode or keep the default lossy threshold so JPEG/WebP assets are not recompressed
-again and again for marginal savings. JPEG lossy mode also checks the source
-quantization table and skips destructive re-encoding when the file already
-appears to be at or below the requested quality.
+**Lossy** can shave a sliver every run. `--lossy` therefore defaults
+`--min-savings` to **10%**, so a commit-back loop converges after one pass.
+JPEG lossy also skips a destructive re-encode when the source quantization
+already looks at or below the requested quality. Pass `--min-savings 0` only
+if you are not re-running automatically.
 
 ### Exit codes
 
-* `0` — success.
-* `1` — with `--check`, at least one file could be optimized (or failed).
+* `0` — success (`--check`: nothing to do).
+* `1` — `--check` and at least one file could be optimized or failed.
 * `2` — no matching input files.
 
-### JSON output
+Failed files are left untouched. Without `--check`, failures are reported but
+the process still exits 0.
 
-`--json` emits a stable top-level `summary` plus per-file `results`, intended
-for CI systems and dashboards:
+### JSON
+
+`--json` emits `summary` plus per-file `results`. `status` is `optimized`,
+`already_optimal`, `skipped`, or `failed`. For `skipped` and `failed`, the
+message is in `error`. Skipped files do not fail `--check`; failed files do.
 
 ```json
 {
@@ -186,14 +126,41 @@ for CI systems and dashboards:
 }
 ```
 
-`status` is one of `optimized`, `already_optimal`, `skipped`, or `failed`.
-Skipped files are left untouched and do not fail `--check`; failed files do.
+`summary.elapsed_ms` is the sum of per-file times, not wall-clock.
 
-## Use in GitHub Actions
+## Formats
 
-This repo ships a composite action (Linux, macOS, and Windows runners).
+| Format | Lossless (default) | Lossy (`--lossy`) | Engine |
+|--------|:---:|:---:|--------|
+| JPEG | DCT coefficient re-write (progressive, optimized Huffman) | re-encode at quality | mozjpeg |
+| PNG  | IDAT recompress + reductions (Zopfli at `--png-level 6`) | palette quantization | oxipng + libimagequant |
+| WebP | lossless re-encode when it cannot drop kept metadata | re-encode at quality | libwebp |
+| SVG  | normalize + minify (text preserved) | reduced coordinate precision | usvg |
+| GIF  | static GIFs re-encoded losslessly | — | gif (pure Rust) |
 
-**Optimize images and commit the result:**
+Notes:
+
+* JPEG lossless is bit-for-bit on pixels (coefficients rewritten).
+* Animated GIF and animated WebP are skipped (not flattened).
+* WebP re-encode is from decoded pixels. If the file has an ICC profile and
+  the policy is keep-color (the lossless default), it is skipped rather than
+  stripping the profile. `--strip all` or `--lossy` (which defaults to strip
+  all) allows the rebuild.
+* SVGs with SMIL, `<script>`, `on*=` handlers, CSS animation,
+  `<foreignObject>`, or external/`data:` `<use>` are skipped. Output is
+  visually lossless, not byte-identical.
+* AVIF is detected and skipped until an optimizer exists.
+* Lossy JPEG/PNG/WebP rebuilds drop metadata, so they only run when the
+  policy is strip-all (the `--lossy` default). `--strip color`/`none` with
+  `--lossy` falls back to lossless for those files.
+
+## GitHub Action
+
+Composite action (Linux, macOS, Windows). It downloads a **release** binary
+(the action ref if that tag exists, else `latest`), verifies the SHA-256, and
+runs it — it does not compile the PR.
+
+Optimize and commit:
 
 ```yaml
 - uses: actions/checkout@v4
@@ -209,7 +176,7 @@ This repo ships a composite action (Linux, macOS, and Windows runners).
     git push
 ```
 
-**Fail a PR if images aren't optimized (a lint gate):**
+Lint gate (fail the PR if images can still shrink):
 
 ```yaml
 - uses: actions/checkout@v4
@@ -220,29 +187,46 @@ This repo ships a composite action (Linux, macOS, and Windows runners).
     check: "true"
 ```
 
-Action inputs: `paths` (required), `lossy`, `quality`, `min-savings`, `recursive`, `strip`,
-`check`, `dry-run`, `json`, `version`, `extra-args`.
+Inputs: `paths` (required), `lossy`, `quality`, `min-savings`, `recursive`,
+`strip`, `check`, `dry-run`, `json`, `version`, `extra-args`.
 
-You can also just download the binary in any workflow and run it directly — see
-the release assets.
+## Architecture
 
-## How it works
+```
+crates/cli   imageopt binary: args, path expansion, progress, table/JSON, exit codes
+crates/core  imageopt-core: format detect → codec candidates → validate → pick smallest → atomic write
+```
 
-The engine is a small library crate (`imageopt-core`) consumed by the CLI. For
-each file it detects the format by content, asks the matching codec to *propose*
-candidate encodings, then keeps the **smallest candidate that re-decodes
-cleanly** — and only if it's smaller than the original. Codec calls (which cross
-into C libraries) are run on a panic-catching boundary, so a single malformed
-image is reported as `failed` and never takes the process down or corrupts the
-original.
+Codecs only *propose* encodings. The engine re-decodes candidates, keeps the
+smallest valid one (unless `--keep-larger`), and writes via temp file → fsync →
+rename. C-codec panics are caught per file. Core has no CLI/async/HTTP
+dependencies.
 
-The library has no async or HTTP dependencies; an HTTP API and a desktop GUI can
-be added later as additional front-ends without touching the engine.
+ADRs and roadmap: [`docs/architecture`](docs/architecture/README.md).
 
-Architecture decisions and the improvement roadmap live in
-[`docs/architecture`](docs/architecture/README.md).
+## Develop
 
-## License
+```bash
+cargo build --all-features
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+cargo run -- --dry-run <dir>
+```
 
-GPL-3.0-or-later. This project uses GPL-licensed compression libraries
-(libimagequant) to match ImageOptim's compression quality. See [LICENSE](LICENSE).
+CI is `.github/workflows/ci.yml` (Linux/macOS/Windows, MSRV 1.82, audit/deny,
+coverage artifact). First build is slow (C codecs); later builds use `target/`.
+
+Release profile must keep `panic = "unwind"`: mozjpeg reports errors by
+unwinding, which the engine converts to a per-file failure. `panic = "abort"`
+would kill the process.
+
+Fuzz `optimize_bytes` from `fuzz/` (separate workspace): `cargo fuzz run optimize_bytes`.
+
+## Contribute
+
+* Match existing module boundaries: engine/codecs in `crates/core`, UX in `crates/cli`.
+* One logical change per commit. Add a test when you touch uncovered behavior.
+* Do not rewrite JPEG FFI or swap codecs without a strong reason.
+* Do not add a server, GUI, or extra runtime tools to the core crate.
+* GPL-3.0-or-later (libimagequant). See [LICENSE](LICENSE).
