@@ -14,9 +14,17 @@ use webp::Encoder;
 
 use super::{CandidateSet, Optimizer};
 use crate::error::Error;
+use crate::metadata::{keep_all, keep_color_profile};
 use crate::options::OptimizeOptions;
 
 pub struct WebpOptimizer;
+
+/// VP8X flags byte (LSB). See the WebP container spec / libwebp
+/// `format_constants.h`.
+const ANIMATION_FLAG: u8 = 0x02;
+const XMP_FLAG: u8 = 0x04;
+const EXIF_FLAG: u8 = 0x08;
+const ICCP_FLAG: u8 = 0x20;
 
 impl Optimizer for WebpOptimizer {
     fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
@@ -25,6 +33,17 @@ impl Optimizer for WebpOptimizer {
         if is_animated_webp(input) {
             return Ok(CandidateSet::Skipped {
                 reason: "animated WebP is left untouched".to_string(),
+            });
+        }
+
+        // `Encoder::from_image` rebuilds from decoded pixels and cannot copy
+        // ICC/EXIF/XMP. Skip rather than emit a smaller candidate that would
+        // violate KeepColorProfile / KeepAll (lossy rebuilds are already gated
+        // by `allow_lossy_rebuild`).
+        if pixel_rebuild_drops_kept_metadata(input, opts) {
+            return Ok(CandidateSet::Skipped {
+                reason: "WebP re-encode would drop ICC/EXIF/XMP under the current metadata policy"
+                    .to_string(),
             });
         }
 
@@ -61,21 +80,84 @@ impl Optimizer for WebpOptimizer {
 ///
 /// Animation only exists in the extended (`VP8X`) format: the VP8X flags byte
 /// carries an animation bit, and animated files additionally contain an `ANIM`
-/// chunk. We check both signals so a malformed flags byte does not let an
-/// animation slip through.
+/// chunk. Chunk fourccs are parsed as RIFF chunks so the letters `ANIM` inside
+/// a still-image payload do not produce a false skip.
 pub(crate) fn is_animated_webp(input: &[u8]) -> bool {
-    // Minimal container: "RIFF" <size> "WEBP" <fourcc> ...
-    if input.len() < 16 || &input[0..4] != b"RIFF" || &input[8..12] != b"WEBP" {
+    let Some(chunks) = webp_chunks(input) else {
         return false;
-    }
-    if &input[12..16] == b"VP8X" {
-        // Layout: "VP8X" <u32 chunk size> <flags byte> ...; the animation flag
-        // is bit 0x02 of the flags byte at offset 20.
-        if input.len() > 20 && input[20] & 0x02 != 0 {
+    };
+    for (fourcc, payload) in chunks {
+        if fourcc == b"VP8X" && payload.first().is_some_and(|f| f & ANIMATION_FLAG != 0) {
+            return true;
+        }
+        if fourcc == b"ANIM" {
             return true;
         }
     }
-    // Fallback: scan a bounded prefix for an ANIM chunk fourcc.
-    let scan = &input[..input.len().min(4096)];
-    scan.windows(4).any(|w| w == b"ANIM")
+    false
+}
+
+/// True when a pixel-rebuild candidate would drop metadata the current policy
+/// requires us to keep. Simple (non-VP8X) WebP has no ICC/EXIF/XMP chunks.
+fn pixel_rebuild_drops_kept_metadata(input: &[u8], opts: &OptimizeOptions) -> bool {
+    if !keep_color_profile(opts.metadata) && !keep_all(opts.metadata) {
+        return false;
+    }
+    let Some(chunks) = webp_chunks(input) else {
+        return false;
+    };
+    let mut has_icc = false;
+    let mut has_exif_or_xmp = false;
+    for (fourcc, payload) in chunks {
+        if fourcc == b"VP8X" {
+            if let Some(&flags) = payload.first() {
+                has_icc |= flags & ICCP_FLAG != 0;
+                has_exif_or_xmp |= flags & (EXIF_FLAG | XMP_FLAG) != 0;
+            }
+        }
+        has_icc |= fourcc == b"ICCP";
+        has_exif_or_xmp |= fourcc == b"EXIF" || fourcc == b"XMP ";
+    }
+    if keep_all(opts.metadata) {
+        has_icc || has_exif_or_xmp
+    } else {
+        has_icc
+    }
+}
+
+/// Iterate RIFF chunks after the 12-byte `RIFF....WEBP` header.
+fn webp_chunks(input: &[u8]) -> Option<WebpChunkIter<'_>> {
+    if input.len() < 12 || &input[0..4] != b"RIFF" || &input[8..12] != b"WEBP" {
+        return None;
+    }
+    Some(WebpChunkIter { rest: &input[12..] })
+}
+
+struct WebpChunkIter<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> Iterator for WebpChunkIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.rest.len() < 8 {
+            return None;
+        }
+        let fourcc = &self.rest[..4];
+        let size = u32::from_le_bytes(self.rest[4..8].try_into().ok()?) as usize;
+        let payload_end = 8usize.checked_add(size)?;
+        if payload_end > self.rest.len() {
+            return None;
+        }
+        let payload = &self.rest[8..payload_end];
+        // RIFF chunks are padded to even length.
+        let next = if size % 2 == 1 {
+            payload_end.saturating_add(1)
+        } else {
+            payload_end
+        };
+        self.rest = self.rest.get(next.min(self.rest.len())..).unwrap_or(&[]);
+        Some((fourcc, payload))
+    }
 }
