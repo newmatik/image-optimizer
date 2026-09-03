@@ -260,6 +260,24 @@ fn make_webp_with_icc_flag() -> Vec<u8> {
 }
 
 #[test]
+fn still_webp_is_not_skipped_because_anim_chunk_is_past_riff_size() {
+    let mut input = make_still_webp_with_anim_bytes_in_payload();
+    // Declared RIFF size already covers only the VP8L chunk. Append a real ANIM
+    // chunk after the container; it must not count as animation.
+    input.extend_from_slice(b"ANIM");
+    input.extend_from_slice(&6u32.to_le_bytes());
+    input.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+
+    if let Ok(o) = optimize_bytes(&input, &OptimizeOptions::default()) {
+        if let OptimizeStatus::Skipped { reason } = o.status {
+            panic!(
+                "trailing ANIM past RIFF size must not mark a still WebP animated, got {reason}"
+            );
+        }
+    }
+}
+
+#[test]
 fn still_webp_is_not_skipped_just_because_payload_contains_anim_bytes() {
     let input = make_still_webp_with_anim_bytes_in_payload();
     if let Ok(o) = optimize_bytes(&input, &OptimizeOptions::default()) {

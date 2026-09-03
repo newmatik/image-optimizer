@@ -125,12 +125,21 @@ fn pixel_rebuild_drops_kept_metadata(input: &[u8], opts: &OptimizeOptions) -> bo
     }
 }
 
-/// Iterate RIFF chunks after the 12-byte `RIFF....WEBP` header.
+/// Iterate RIFF chunks after the 12-byte `RIFF....WEBP` header, limited to the
+/// container size declared at bytes 4..8 so trailing garbage is ignored.
 fn webp_chunks(input: &[u8]) -> Option<WebpChunkIter<'_>> {
     if input.len() < 12 || &input[0..4] != b"RIFF" || &input[8..12] != b"WEBP" {
         return None;
     }
-    Some(WebpChunkIter { rest: &input[12..] })
+    let riff_size = u32::from_le_bytes(input[4..8].try_into().ok()?) as usize;
+    // Size is the number of bytes after the size field (from offset 8).
+    let end = 8usize.checked_add(riff_size)?.min(input.len());
+    if end < 12 {
+        return None;
+    }
+    Some(WebpChunkIter {
+        rest: &input[12..end],
+    })
 }
 
 struct WebpChunkIter<'a> {

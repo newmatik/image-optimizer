@@ -404,13 +404,16 @@ where
                 name: path.display().to_string(),
             });
             // Throttle on the file's on-disk size (a proxy for its memory cost)
-            // when a budget is configured. The permit is held until this
-            // closure returns (including on panic).
-            let _permit = budget.map(|sem| {
-                let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                sem.acquire(size)
-            });
-            let res = optimize_file(path, opts, sink);
+            // when a budget is configured. Drop the permit before Finished so a
+            // callback that waits on another worker cannot deadlock against
+            // acquire. RAII still releases on panic inside optimize_file.
+            let res = {
+                let _permit = budget.map(|sem| {
+                    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    sem.acquire(size)
+                });
+                optimize_file(path, opts, sink)
+            };
             progress(ProgressEvent::Finished { index, total });
             (index, res)
         })

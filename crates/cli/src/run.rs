@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use globset::Glob;
+use globset::GlobBuilder;
 use imageopt_core::{optimize_paths, ImageFormat, OptimizeResult, OutputSink, ProgressEvent};
 use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
@@ -76,7 +76,10 @@ fn collect_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>, seen: &mut H
 
 /// Split a glob into a literal root directory to walk and the pattern matcher.
 fn collect_glob(pattern: &str, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
-    let glob = match Glob::new(pattern) {
+    // `*`/`?` must not match path separators, matching shell globs and the
+    // walk-depth cap (`**` is the recursive form). globset's default is the
+    // opposite.
+    let glob = match GlobBuilder::new(pattern).literal_separator(true).build() {
         Ok(g) => g.compile_matcher(),
         Err(e) => {
             eprintln!("imageopt: invalid glob `{pattern}`: {e}");
@@ -206,6 +209,20 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn glob_star_does_not_match_path_separators() {
+        let matcher = GlobBuilder::new("assets/*/*.png")
+            .literal_separator(true)
+            .build()
+            .unwrap()
+            .compile_matcher();
+        assert!(matcher.is_match("assets/a/b.png"));
+        assert!(
+            !matcher.is_match("assets/a/b/c.png"),
+            "* must not span directories"
+        );
+    }
+
+    #[test]
     fn glob_walk_depth_is_bounded_unless_double_star() {
         assert_eq!(glob_walk_max_depth("*.png"), Some(1));
         assert_eq!(glob_walk_max_depth("assets/*.png"), Some(1));
@@ -249,6 +266,24 @@ mod tests {
         let paths = expand_paths(&[pattern], false);
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].file_name().unwrap(), "top.png");
+    }
+
+    #[test]
+    fn two_level_glob_does_not_let_star_match_slashes() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("a").join("b")).unwrap();
+        fs::write(dir.path().join("a").join("mid.png"), make_png()).unwrap();
+        fs::write(dir.path().join("a").join("b").join("deep.png"), make_png()).unwrap();
+
+        let pattern = dir
+            .path()
+            .join("*")
+            .join("*.png")
+            .to_string_lossy()
+            .into_owned();
+        let paths = expand_paths(&[pattern], false);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].file_name().unwrap(), "mid.png");
     }
 
     #[test]
