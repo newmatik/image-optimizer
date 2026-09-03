@@ -47,14 +47,15 @@ fn push_unique(path: PathBuf, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf
 }
 
 /// Whether a file found during a directory walk should be handed to the engine.
-/// Files with a known image extension qualify, and so do *extensionless* files
-/// (the engine detects format by content, so a misnamed/extensionless image is
-/// still optimized). Files with a known non-image extension are skipped to avoid
-/// reading every unrelated file in a tree. Explicitly named files and globs are
-/// never filtered this way.
+///
+/// Only files with a known image extension qualify. Extensionless names
+/// (`LICENSE`, `Makefile`, `Dockerfile`) are skipped so `imageopt .` does not
+/// read every non-image in the tree and report it as skipped. Explicitly named
+/// files and glob matches are never filtered this way — pass a path or glob if
+/// the image has no (or a non-standard) extension.
 fn should_consider(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
-        None => true,
+        None => false,
         Some(ext) => ImageFormat::from_extension(ext) != ImageFormat::Unknown,
     }
 }
@@ -83,7 +84,11 @@ fn collect_glob(pattern: &str, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBu
         }
     };
     let root = glob_root(pattern);
-    for entry in WalkDir::new(&root) {
+    let mut walker = WalkDir::new(&root);
+    if let Some(depth) = glob_walk_max_depth(pattern) {
+        walker = walker.max_depth(depth);
+    }
+    for entry in walker {
         match entry {
             Ok(entry) => {
                 if entry.file_type().is_file() && glob.is_match(entry.path()) {
@@ -132,6 +137,38 @@ fn glob_root(pattern: &str) -> PathBuf {
     }
 }
 
+/// How deep [`WalkDir`] needs to go for `pattern`, relative to [`glob_root`].
+///
+/// Patterns without `**` cannot match below a fixed number of segments, so we
+/// cap the walk. `*.png` in a large repo must not recurse into `target/` or
+/// `.git`. `None` means unbounded (`**` is present).
+fn glob_walk_max_depth(pattern: &str) -> Option<usize> {
+    if pattern.contains("**") {
+        return None;
+    }
+    let bytes = pattern.as_bytes();
+    let mut seg_start = 0;
+    let mut glob_seg = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'/' | b'\\' => {
+                if glob_seg.is_none() {
+                    seg_start = i + 1;
+                }
+            }
+            b'*' | b'?' | b'[' => {
+                if glob_seg.is_none() {
+                    glob_seg = Some(seg_start);
+                }
+            }
+            _ => {}
+        }
+    }
+    let rest = &pattern[glob_seg.unwrap_or(0)..];
+    let n = rest.split(['/', '\\']).filter(|s| !s.is_empty()).count();
+    Some(n.max(1))
+}
+
 /// Run the optimization across `paths` with a live progress bar (unless quiet
 /// or JSON output is requested).
 pub fn run(
@@ -165,4 +202,95 @@ pub fn run(
         b.finish_and_clear();
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn glob_walk_depth_is_bounded_unless_double_star() {
+        assert_eq!(glob_walk_max_depth("*.png"), Some(1));
+        assert_eq!(glob_walk_max_depth("assets/*.png"), Some(1));
+        assert_eq!(glob_walk_max_depth("assets/*/*.png"), Some(2));
+        assert_eq!(glob_walk_max_depth("foo/bar/img?.jpg"), Some(1));
+        assert_eq!(glob_walk_max_depth("**/*.png"), None);
+        assert_eq!(glob_walk_max_depth("assets/**/*.webp"), None);
+        assert_eq!(glob_walk_max_depth(r"C:\photos\*.jpg"), Some(1));
+    }
+
+    #[test]
+    fn directory_walk_skips_extensionless_and_non_image_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("LICENSE"), b"text").unwrap();
+        fs::write(dir.path().join("notes.txt"), b"text").unwrap();
+        fs::write(dir.path().join("logo.png"), make_png()).unwrap();
+
+        let paths = expand_paths(&[dir.path().to_string_lossy().into_owned()], false);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].file_name().unwrap(), "logo.png");
+    }
+
+    #[test]
+    fn explicit_path_is_kept_even_without_an_image_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let license = dir.path().join("LICENSE");
+        fs::write(&license, b"text").unwrap();
+
+        let paths = expand_paths(&[license.to_string_lossy().into_owned()], false);
+        assert_eq!(paths, vec![license]);
+    }
+
+    #[test]
+    fn shallow_glob_does_not_pick_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("top.png"), make_png()).unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested").join("deep.png"), make_png()).unwrap();
+
+        let pattern = dir.path().join("*.png").to_string_lossy().into_owned();
+        let paths = expand_paths(&[pattern], false);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].file_name().unwrap(), "top.png");
+    }
+
+    #[test]
+    fn recursive_glob_picks_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("top.png"), make_png()).unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested").join("deep.png"), make_png()).unwrap();
+
+        let pattern = dir
+            .path()
+            .join("**")
+            .join("*.png")
+            .to_string_lossy()
+            .into_owned();
+        let mut paths = expand_paths(&[pattern], false);
+        paths.sort();
+        assert_eq!(paths.len(), 2);
+    }
+
+    fn make_png() -> Vec<u8> {
+        use std::io::Cursor;
+
+        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        use image::{ExtendedColorType, ImageEncoder};
+
+        let mut img = image::RgbaImage::new(8, 8);
+        for px in img.pixels_mut() {
+            *px = image::Rgba([255, 0, 0, 255]);
+        }
+        let mut buf = Vec::new();
+        PngEncoder::new_with_quality(
+            Cursor::new(&mut buf),
+            CompressionType::Fast,
+            FilterType::NoFilter,
+        )
+        .write_image(img.as_raw(), 8, 8, ExtendedColorType::Rgba8)
+        .unwrap();
+        buf
+    }
 }
