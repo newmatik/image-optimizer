@@ -151,15 +151,11 @@ fn glob_walk_max_depth(pattern: &str) -> Option<usize> {
     let mut glob_seg = None;
     for (i, &b) in bytes.iter().enumerate() {
         match b {
-            b'/' | b'\\' => {
-                if glob_seg.is_none() {
-                    seg_start = i + 1;
-                }
+            b'/' | b'\\' if glob_seg.is_none() => {
+                seg_start = i + 1;
             }
-            b'*' | b'?' | b'[' => {
-                if glob_seg.is_none() {
-                    glob_seg = Some(seg_start);
-                }
+            b'*' | b'?' | b'[' if glob_seg.is_none() => {
+                glob_seg = Some(seg_start);
             }
             _ => {}
         }
