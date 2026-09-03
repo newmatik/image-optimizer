@@ -334,22 +334,41 @@ impl ByteSemaphore {
     }
 
     /// Reserve `want` bytes (clamped to at least 1 and at most the whole
-    /// budget), blocking until they are available. Returns the amount reserved,
-    /// which must be passed back to [`ByteSemaphore::release`].
-    fn acquire(&self, want: u64) -> u64 {
+    /// budget), blocking until they are available. Returns a permit that
+    /// releases the reservation when dropped, so a panic in the worker cannot
+    /// leak budget and deadlock the rest of the batch.
+    fn acquire(&self, want: u64) -> InFlightPermit<'_> {
         let want = want.clamp(1, self.budget);
-        let mut available = self.available.lock().unwrap();
+        let mut available = self.available.lock().unwrap_or_else(|e| e.into_inner());
         while *available < want {
-            available = self.ready.wait(available).unwrap();
+            available = self
+                .ready
+                .wait(available)
+                .unwrap_or_else(|e| e.into_inner());
         }
         *available -= want;
-        want
+        InFlightPermit {
+            sem: self,
+            amount: want,
+        }
     }
 
     fn release(&self, amount: u64) {
-        let mut available = self.available.lock().unwrap();
+        let mut available = self.available.lock().unwrap_or_else(|e| e.into_inner());
         *available += amount;
         self.ready.notify_all();
+    }
+}
+
+/// RAII reservation against a [`ByteSemaphore`].
+struct InFlightPermit<'a> {
+    sem: &'a ByteSemaphore,
+    amount: u64,
+}
+
+impl Drop for InFlightPermit<'_> {
+    fn drop(&mut self) {
+        self.sem.release(self.amount);
     }
 }
 
@@ -385,15 +404,13 @@ where
                 name: path.display().to_string(),
             });
             // Throttle on the file's on-disk size (a proxy for its memory cost)
-            // when a budget is configured.
-            let permit = budget.map(|sem| {
+            // when a budget is configured. The permit is held until this
+            // closure returns (including on panic).
+            let _permit = budget.map(|sem| {
                 let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                 sem.acquire(size)
             });
             let res = optimize_file(path, opts, sink);
-            if let (Some(sem), Some(amount)) = (budget, permit) {
-                sem.release(amount);
-            }
             progress(ProgressEvent::Finished { index, total });
             (index, res)
         })
