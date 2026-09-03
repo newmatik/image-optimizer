@@ -375,7 +375,15 @@ fn avif_is_detected_but_skipped_until_optimizer_exists() {
     let input = b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00mif1avif".to_vec();
     let out = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
 
-    assert!(matches!(out.status, OptimizeStatus::Skipped { .. }));
+    match &out.status {
+        OptimizeStatus::Skipped { reason } => {
+            assert!(
+                reason.contains("AVIF") && reason.contains("not yet supported"),
+                "unexpected skip reason: {reason}"
+            );
+        }
+        other => panic!("expected skipped AVIF, got {other:?}"),
+    }
     assert_eq!(
         out.bytes, input,
         "unsupported AVIF must be returned verbatim"

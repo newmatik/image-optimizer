@@ -424,6 +424,7 @@ where
 fn skip_reason(format: ImageFormat) -> String {
     match format {
         ImageFormat::Unknown => "unrecognized or unsupported file format".to_string(),
+        ImageFormat::Avif => "AVIF optimization is not yet supported".to_string(),
         other => format!(
             "{} optimization is not enabled in this build",
             other.as_str()
