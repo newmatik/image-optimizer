@@ -83,3 +83,45 @@ impl OptimizeOptions {
         self.lossy && matches!(self.metadata, MetadataPolicy::StripAll)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_or_clamps_and_falls_back() {
+        let mut o = OptimizeOptions::default();
+        assert_eq!(o.quality_or(75), 75);
+        o.quality = Some(0);
+        assert_eq!(o.quality_or(75), 1);
+        o.quality = Some(250);
+        assert_eq!(o.quality_or(75), 100);
+        o.quality = Some(42);
+        assert_eq!(o.quality_or(75), 42);
+    }
+
+    #[test]
+    fn lossy_rebuild_requires_lossy_and_strip_all() {
+        let opts = |lossy, metadata| OptimizeOptions {
+            lossy,
+            metadata,
+            ..Default::default()
+        };
+
+        assert!(opts(true, MetadataPolicy::StripAll).allow_lossy_rebuild());
+        assert!(!opts(true, MetadataPolicy::KeepColorProfile).allow_lossy_rebuild());
+        assert!(!opts(true, MetadataPolicy::KeepAll).allow_lossy_rebuild());
+        assert!(!opts(false, MetadataPolicy::StripAll).allow_lossy_rebuild());
+    }
+
+    #[test]
+    fn defaults_are_lossless_and_keep_color_profile() {
+        let o = OptimizeOptions::default();
+
+        assert!(!o.lossy);
+        assert!(!o.keep_larger);
+        assert_eq!(o.metadata, MetadataPolicy::KeepColorProfile);
+        assert_eq!(o.max_pixels, 16_384 * 16_384);
+        assert_eq!(o.max_in_flight_bytes, None);
+    }
+}

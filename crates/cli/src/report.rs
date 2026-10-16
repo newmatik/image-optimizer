@@ -273,3 +273,149 @@ fn truncate(s: &str, max: usize) -> String {
     let tail: String = s.chars().skip(count - keep).collect();
     format!("…{tail}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imageopt_core::ImageFormat;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn result(status: OptimizeStatus, original: u64, optimized: u64) -> OptimizeResult {
+        OptimizeResult {
+            source: Some(PathBuf::from("a.png")),
+            format: ImageFormat::Png,
+            original_size: original,
+            optimized_size: optimized,
+            status,
+            elapsed: Duration::from_millis(5),
+        }
+    }
+
+    fn cli(check: bool) -> Cli {
+        Cli {
+            paths: vec!["assets".to_string()],
+            recursive: false,
+            lossy: false,
+            quality: None,
+            png_level: 3,
+            min_savings: None,
+            strip: None,
+            dry_run: false,
+            backup: false,
+            check,
+            json: false,
+            jobs: None,
+            max_in_flight_mb: None,
+            keep_larger: false,
+            quiet: false,
+        }
+    }
+
+    #[test]
+    fn human_size_scales_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(1536), "1.5 KB");
+        assert_eq!(human_size(1024 * 1024), "1.0 MB");
+        assert!(human_size(u64::MAX).ends_with("TB"));
+    }
+
+    #[test]
+    fn truncate_keeps_tail_with_ellipsis() {
+        assert_eq!(truncate("abc", 3), "abc");
+        assert_eq!(truncate("abcdef", 4), "…def");
+        // Counts chars, not bytes.
+        assert_eq!(truncate("ééééé", 3), "…éé");
+    }
+
+    #[test]
+    fn summarize_counts_statuses_and_only_credits_optimized_savings() {
+        let results = vec![
+            result(OptimizeStatus::Optimized, 1000, 400),
+            result(OptimizeStatus::AlreadyOptimal, 500, 500),
+            result(
+                OptimizeStatus::Skipped {
+                    reason: "x".to_string(),
+                },
+                200,
+                100,
+            ),
+            result(
+                OptimizeStatus::Failed {
+                    error: "y".to_string(),
+                },
+                300,
+                0,
+            ),
+        ];
+        let s = summarize(&results);
+
+        assert_eq!(s.total, 4);
+        assert_eq!(
+            (s.optimized, s.already_optimal, s.skipped, s.failed),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(s.original_size, 2000);
+        assert_eq!(s.optimized_size, 400 + 500 + 200 + 300);
+        assert_eq!(s.saved_bytes, 600);
+        assert!((s.saved_percent - 30.0).abs() < 1e-9);
+        assert_eq!(s.formats.get("png"), Some(&4));
+        assert_eq!(s.elapsed_ms, 20);
+    }
+
+    #[test]
+    fn summarize_reports_growth_as_negative_savings() {
+        let s = summarize(&[result(OptimizeStatus::Optimized, 100, 150)]);
+
+        assert_eq!(s.saved_bytes, -50);
+        assert!(s.saved_percent < 0.0);
+    }
+
+    #[test]
+    fn summarize_empty_has_zero_percent() {
+        let s = summarize(&[]);
+
+        assert_eq!(s.total, 0);
+        assert_eq!(s.saved_percent, 0.0);
+    }
+
+    #[test]
+    fn exit_code_is_zero_without_check_even_on_failure() {
+        let failed = result(
+            OptimizeStatus::Failed {
+                error: "boom".to_string(),
+            },
+            10,
+            10,
+        );
+
+        assert_eq!(exit_code(&[failed], &cli(false)), 0);
+    }
+
+    #[test]
+    fn exit_code_check_flags_optimizable_and_failed_only() {
+        let optimal = result(OptimizeStatus::AlreadyOptimal, 10, 10);
+        let skipped = result(
+            OptimizeStatus::Skipped {
+                reason: "avif".to_string(),
+            },
+            10,
+            10,
+        );
+        let optimized = result(OptimizeStatus::Optimized, 10, 5);
+        let failed = result(
+            OptimizeStatus::Failed {
+                error: "boom".to_string(),
+            },
+            10,
+            10,
+        );
+
+        assert_eq!(exit_code(&[], &cli(true)), 0);
+        assert_eq!(exit_code(&[optimal.clone(), skipped], &cli(true)), 0);
+        assert_eq!(exit_code(&[optimal.clone(), optimized], &cli(true)), 1);
+        assert_eq!(exit_code(&[optimal, failed], &cli(true)), 1);
+    }
+}
