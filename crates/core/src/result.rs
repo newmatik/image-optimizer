@@ -83,3 +83,64 @@ pub struct OptimizedImage {
     /// Outcome.
     pub status: OptimizeStatus,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(original: u64, optimized: u64, status: OptimizeStatus) -> OptimizeResult {
+        OptimizeResult {
+            source: None,
+            format: ImageFormat::Png,
+            original_size: original,
+            optimized_size: optimized,
+            status,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn saved_bytes_and_percent() {
+        let r = result(200, 150, OptimizeStatus::Optimized);
+
+        assert_eq!(r.saved_bytes(), 50);
+        assert!((r.saved_percent() - 25.0).abs() < 1e-9);
+        assert!(r.is_optimized());
+    }
+
+    #[test]
+    fn saved_is_negative_when_output_grew() {
+        let r = result(100, 130, OptimizeStatus::Optimized);
+
+        assert_eq!(r.saved_bytes(), -30);
+        assert!(r.saved_percent() < 0.0);
+    }
+
+    #[test]
+    fn zero_sized_original_does_not_divide_by_zero() {
+        let r = result(0, 0, OptimizeStatus::AlreadyOptimal);
+
+        assert_eq!(r.saved_percent(), 0.0);
+        assert!(!r.is_optimized());
+    }
+
+    #[test]
+    fn status_labels() {
+        assert_eq!(OptimizeStatus::Optimized.label(), "optimized");
+        assert_eq!(OptimizeStatus::AlreadyOptimal.label(), "already optimal");
+        assert_eq!(
+            OptimizeStatus::Skipped {
+                reason: String::new()
+            }
+            .label(),
+            "skipped"
+        );
+        assert_eq!(
+            OptimizeStatus::Failed {
+                error: String::new()
+            }
+            .label(),
+            "failed"
+        );
+    }
+}
