@@ -44,3 +44,42 @@ pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         "unknown panic".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_message_reads_str_and_string_payloads() {
+        assert_eq!(panic_message(Box::new("boom")), "boom");
+        assert_eq!(panic_message(Box::new(String::from("bang"))), "bang");
+    }
+
+    #[test]
+    fn panic_message_falls_back_for_other_payloads() {
+        assert_eq!(panic_message(Box::new(42_u32)), "unknown panic");
+    }
+
+    #[test]
+    fn display_messages_are_stable() {
+        assert_eq!(Error::Decode("x".into()).to_string(), "decode failed: x");
+        assert_eq!(Error::Encode("y".into()).to_string(), "encode failed: y");
+        assert_eq!(
+            Error::TooLarge {
+                pixels: 10,
+                limit: 5
+            }
+            .to_string(),
+            "image too large: 10 pixels exceeds limit of 5"
+        );
+        assert_eq!(Error::Panicked("z".into()).to_string(), "codec aborted: z");
+        assert_eq!(Error::Other("w".into()).to_string(), "w");
+    }
+
+    #[test]
+    fn io_errors_convert_with_from() {
+        let err: Error = std::io::Error::new(std::io::ErrorKind::NotFound, "gone").into();
+        assert!(matches!(err, Error::Io(_)));
+        assert_eq!(err.to_string(), "io error: gone");
+    }
+}

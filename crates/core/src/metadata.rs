@@ -15,3 +15,22 @@ pub fn keep_color_profile(policy: MetadataPolicy) -> bool {
 pub fn keep_all(policy: MetadataPolicy) -> bool {
     matches!(policy, MetadataPolicy::KeepAll)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_profile_is_kept_unless_stripping_all() {
+        assert!(!keep_color_profile(MetadataPolicy::StripAll));
+        assert!(keep_color_profile(MetadataPolicy::KeepColorProfile));
+        assert!(keep_color_profile(MetadataPolicy::KeepAll));
+    }
+
+    #[test]
+    fn only_keep_all_preserves_everything() {
+        assert!(!keep_all(MetadataPolicy::StripAll));
+        assert!(!keep_all(MetadataPolicy::KeepColorProfile));
+        assert!(keep_all(MetadataPolicy::KeepAll));
+    }
+}
