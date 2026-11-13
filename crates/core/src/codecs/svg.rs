@@ -459,9 +459,12 @@ fn has_context_unit(lower: &str) -> bool {
 /// lowercased.
 fn has_unsupported_function(lower: &str, allowed: &[&[&str]]) -> bool {
     lower.match_indices('(').any(|(idx, _)| {
+        // Step past the delimiter by its UTF-8 length: it may be multibyte.
         let name_start = lower[..idx]
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-            .map_or(0, |i| i + 1);
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '-'))
+            .map_or(0, |(i, c)| i + c.len_utf8());
         let name = &lower[name_start..idx];
         !allowed.iter().any(|list| list.contains(&name))
     })
@@ -999,6 +1002,21 @@ mod tests {
         assert!(!css_is_static(".a{fill:red !important}"));
         assert!(!css_is_static(".a{fill:red"));
         assert!(!css_is_static("/* open .a{fill:red}"));
+    }
+
+    #[test]
+    fn value_functions_are_matched_on_character_boundaries() {
+        let paint: &[&[&str]] = &[VALUE_FUNCTIONS];
+        assert!(!has_unsupported_function("url(#g) rgb(1,2,3)", paint));
+        assert!(has_unsupported_function("color(srgb 1 0 0)", paint));
+        assert!(has_unsupported_function("translate(1 2)", paint));
+        assert!(!has_unsupported_function(
+            "translate(1 2)",
+            &[VALUE_FUNCTIONS, TRANSFORM_FUNCTIONS]
+        ));
+        // Multibyte text before a parenthesis must not panic.
+        assert!(has_unsupported_function("温度(°c)", paint));
+        assert!(has_unsupported_function("(x)", paint));
     }
 
     #[test]

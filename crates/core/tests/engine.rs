@@ -717,6 +717,15 @@ fn svg_descriptive_content_follows_the_metadata_policy() {
         assert_eq!(out.status, OptimizeStatus::Optimized);
     }
 
+    // Non-ASCII text in an attribute must never make the file fail.
+    let unicode = format!(r#"<svg {ns} data-label="温度(°C)">{VERBOSE_PATH}{VERBOSE_PATH}</svg>"#);
+    let out = optimize_svg(&unicode, MetadataPolicy::KeepColorProfile);
+    assert!(
+        !matches!(out.status, OptimizeStatus::Failed { .. }),
+        "{:?}",
+        out.status
+    );
+
     // Editor data is metadata: removed by default.
     let editor = format!(
         r#"<svg {ns} xmlns:ink="http://www.inkscape.org/namespaces/inkscape" ink:version="1.0"><!-- made by hand --><metadata><ink:x/></metadata><ink:view/>{VERBOSE_PATH}</svg>"#
