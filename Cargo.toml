@@ -28,6 +28,9 @@ webp = "0.3"
 # thread-safe pure-Rust `gif` crate; animated GIFs are left untouched.
 gif = "0.14"
 usvg = "0.49"
+# Same XML parser usvg uses; the SVG codec inspects the parsed document before
+# handing it to usvg.
+roxmltree = "0.21"
 
 # --- engine support ---
 rayon = "1"

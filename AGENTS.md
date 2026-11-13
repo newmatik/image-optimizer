@@ -70,8 +70,12 @@ pins `stable` plus clippy/rustfmt.
 * Lossy JPEG/PNG/WebP pixel-rebuilds drop metadata → only when
   `allow_lossy_rebuild()` (lossy **and** `StripAll`).
 * Animated GIF / animated WebP: skip, never flatten.
-* Unsafe SVG (script, SMIL, event handlers, CSS animation, foreignObject,
-  external `use`): skip.
+* SVG: rewrite only documents made of allowlisted static elements; skip
+  everything usvg would drop or freeze (text, links, script, animation,
+  foreignObject, external references, `currentColor`, `var()`, dynamic CSS).
+  The root `viewBox` and the absence of `width`/`height` must survive.
+  `<title>`/`<desc>`/`aria-*` go only with strip-all; keep-all skips every
+  SVG.
 * AVIF: detect, skip, no optimizer yet.
 * `optimize_paths` preserves input order. `--max-in-flight-mb` is a byte
   semaphore on on-disk size; a file larger than the budget still runs alone.
@@ -82,8 +86,10 @@ pins `stable` plus clippy/rustfmt.
   guards, `C-unwind` `error_exit`. Touch only with a failing test first.
 * `crates/core/src/codecs/webp.rs` — RIFF chunk walk (animation flag / ANIM
   chunk; ICC/EXIF/XMP vs metadata policy). Pixel rebuild cannot copy ICC.
-* `crates/core/src/codecs/svg.rs` — conservative substring denylist, not a
-  full SVG/CSS parser.
+* `crates/core/src/codecs/svg.rs` — element allowlist on the parsed document
+  (roxmltree) plus substring checks, then usvg, then `restore_root`. usvg
+  deletes what it does not model without an error, so a new element or CSS
+  feature is unsafe until a test shows the output still renders the same.
 * `crates/core/src/engine.rs` — candidate pick, decompression-bomb
   (`max_pixels`, including WebP header probe), `ByteSemaphore`.
 * `crates/cli/src/run.rs` — glob walk depth (`**` unbounded; `*.png` is

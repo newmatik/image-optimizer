@@ -135,7 +135,7 @@ message is in `error`. Skipped files do not fail `--check`; failed files do.
 | JPEG | DCT coefficient re-write (progressive, optimized Huffman) | re-encode at quality | mozjpeg |
 | PNG  | IDAT recompress + reductions (Zopfli at `--png-level 6`) | palette quantization | oxipng + libimagequant |
 | WebP | lossless re-encode when it cannot drop kept metadata | re-encode at quality | libwebp |
-| SVG  | normalize + minify (text preserved) | reduced coordinate precision | usvg |
+| SVG  | normalize + minify static vector art; anything else is skipped | reduced coordinate precision | usvg |
 | GIF  | static GIFs re-encoded losslessly | — | gif (pure Rust) |
 
 Notes:
@@ -146,9 +146,31 @@ Notes:
   the policy is keep-color (the lossless default), it is skipped rather than
   stripping the profile. `--strip all` or `--lossy` (which defaults to strip
   all) allows the rebuild.
-* SVGs with SMIL, `<script>`, `on*=` handlers, CSS animation,
-  `<foreignObject>`, or external/`data:` `<use>` are skipped. Output is
-  visually lossless, not byte-identical.
+* SVG is rewritten only when the file consists of static vector art the
+  normalizer reproduces: shapes, groups, gradients, patterns, clips, masks,
+  markers, filters, embedded raster (`data:`) images, and plain `<style>`
+  rules.
+  Output is visually lossless, not byte-identical; the root `viewBox` is kept
+  so the image still scales.
+* SVGs are skipped, untouched, when they contain `<text>`, links (`<a>`),
+  `<switch>` or conditional attributes, scripting, `on*=` handlers, SMIL or
+  CSS animation, `<foreignObject>`, external references or `xml:base`,
+  embedded SVG images, `currentColor`, `var()`, CSS beyond plain presentation
+  rules (at-rules, pseudo-classes, geometry or `transform` properties, a
+  `<style>` with comments), font- or viewport-relative lengths (`em`, `vw`),
+  or a root the tool cannot carry over (percent or unit lengths, no `viewBox`
+  and no size, a non-default `preserveAspectRatio`, `overflow`).
+* SVGs nested or cross-referenced deeper than 64 levels, with a reference
+  cycle, or with entities that contain markup are skipped as well (they
+  could exhaust the stack).
+* The check is conservative, not a proof: the normalizer has no complete list
+  of what it ignores. Use `--dry-run` and review the diff for artwork that
+  matters.
+* `<title>`, `<desc>`, `role` and `aria-*` are content: such files are skipped
+  unless `--strip all`. Comments and editor metadata (Inkscape, Illustrator,
+  `<metadata>`) are removed. With `--strip none` no SVG is rewritten.
+* `class` attributes are resolved against the file's own `<style>` and then
+  removed. Do not run the tool on SVGs that a page styles from outside.
 * AVIF is detected and skipped until an optimizer exists.
 * Lossy JPEG/PNG/WebP rebuilds drop metadata, so they only run when the
   policy is strip-all (the `--lossy` default). `--strip color`/`none` with
