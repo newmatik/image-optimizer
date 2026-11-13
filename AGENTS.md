@@ -98,9 +98,9 @@ pins `stable` plus clippy/rustfmt.
 * Do not treat GitHub Action smoke as proof the current branch’s CLI works.
 * Do not “upgrade” `dtolnay/rust-toolchain` in Dependabot for the MSRV job
   (see `.github/dependabot.yml`); that pin is the Rust version, not an action tag.
-* Do not remove `RUSTSEC-2026-0192` / `RUSTSEC-2026-0206` ignores in
-  `deny.toml` and `.cargo/audit.toml` until usvg drops rustybuzz/fontdb.
-  Keep the two files in sync.
+* Do not add a RustSec ignore to only one of `deny.toml` and
+  `.cargo/audit.toml`: keep the two lists in sync, give each entry a reason,
+  and remove it once `cargo deny check` reports it as not encountered.
 * Do not rewrite working codec code for style.
 
 ## Tests
