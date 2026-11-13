@@ -552,6 +552,38 @@ fn in_place_write_follows_a_symlink_and_keeps_the_link() {
     assert_eq!(std::fs::read_dir(&link_dir).unwrap().count(), 1);
 }
 
+/// The directory sink replaces the entry in its root. It must not follow a
+/// symlink that already sits there and overwrite a file outside the root.
+#[cfg(unix)]
+#[test]
+fn directory_sink_does_not_write_through_an_existing_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("img.png");
+    std::fs::write(&src, make_png()).unwrap();
+    let outside = dir.path().join("outside.png");
+    std::fs::write(&outside, b"unrelated").unwrap();
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+    let dst = out_dir.join("img.png");
+    std::os::unix::fs::symlink(&outside, &dst).unwrap();
+
+    let r = optimize_file(
+        &src,
+        &OptimizeOptions::default(),
+        &OutputSink::Directory {
+            root: out_dir.clone(),
+        },
+    );
+
+    assert_eq!(r.status, OptimizeStatus::Optimized);
+    assert_eq!(std::fs::read(&outside).unwrap(), b"unrelated");
+    assert!(!std::fs::symlink_metadata(&dst)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(image::load_from_memory(&std::fs::read(&dst).unwrap()).is_ok());
+}
+
 #[test]
 fn directory_sink_writes_to_dest_and_leaves_source_untouched() {
     let src_dir = tempfile::tempdir().unwrap();

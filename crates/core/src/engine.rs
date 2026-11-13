@@ -279,7 +279,9 @@ pub fn optimize_file(path: &Path, opts: &OptimizeOptions, sink: &OutputSink) -> 
                         return fail(format!("backup failed: {e}"));
                     }
                 }
-                if let Err(e) = atomic_write(path, &out.bytes) {
+                let written =
+                    in_place_target(path).and_then(|target| atomic_write(&target, &out.bytes));
+                if let Err(e) = written {
                     return fail(format!("write failed: {e}"));
                 }
             }
@@ -469,24 +471,22 @@ fn backup_original(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Write `bytes` to `path` (or, for a symlink, to the file it points to)
-/// atomically: temp file in the same directory →
+/// The file an in-place write has to replace. A rename replaces the directory
+/// entry it is given: for a symlink that would turn the link into a regular
+/// file and leave its target untouched, so in-place writes go to the target.
+/// Only the in-place sink does this; a directory sink must never write outside
+/// its root through a link that happens to exist there.
+fn in_place_target(path: &Path) -> std::io::Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => fs::canonicalize(path),
+        _ => Ok(path.to_path_buf()),
+    }
+}
+
+/// Write `bytes` to `path` atomically: temp file in the same directory →
 /// preserve permissions → fsync file → rename over the original → fsync the
 /// directory (POSIX) so the replacement survives a crash/power-loss.
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    // A rename replaces the directory entry it is given. For a symlink that
-    // would turn the link into a regular file and leave its target untouched,
-    // so write through the link: the temp file is created next to the target
-    // and renamed over it.
-    let resolved;
-    let path = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            resolved = fs::canonicalize(path)?;
-            resolved.as_path()
-        }
-        _ => path,
-    };
-
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = dir.unwrap_or_else(|| Path::new("."));
 
