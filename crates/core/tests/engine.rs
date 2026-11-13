@@ -482,6 +482,8 @@ fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
         format!(r#"<svg {ns}><style>path:hover{{fill:blue}}</style>{VERBOSE_PATH}</svg>"#),
         // A namespace prefix must not bypass the gate.
         r#"<s:svg xmlns:s="http://www.w3.org/2000/svg" width="100" height="100"><s:text x="1" y="9">Hi</s:text></s:svg>"#.to_string(),
+        // A root without the SVG namespace must not skip the element checks.
+        format!(r#"<svg width="100" height="100">{VERBOSE_PATH}<text x="1" y="9">Hi</text></svg>"#),
         // Sizes that depend on the embedding context.
         format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">{VERBOSE_PATH}</svg>"#

@@ -177,7 +177,14 @@ fn check_document(doc: &roxmltree::Document<'_>, policy: MetadataPolicy) -> Resu
             return Err(metadata_reason("comments"));
         }
     }
-    check_element(doc.root_element(), policy)
+    // Only foreign *descendants* are editor data. A root that is not an
+    // SVG-namespace `<svg>` (for example one without `xmlns`) must not take
+    // that shortcut, or nothing below it would be checked.
+    let root = doc.root_element();
+    if root.tag_name().namespace() != Some(SVG_NS) || root.tag_name().name() != "svg" {
+        return Err("SVG root element is not an <svg> in the SVG namespace".to_string());
+    }
+    check_element(root, policy)
 }
 
 fn check_element(node: roxmltree::Node<'_, '_>, policy: MetadataPolicy) -> Result<(), String> {
