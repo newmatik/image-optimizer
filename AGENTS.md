@@ -61,6 +61,7 @@ pins `stable` plus clippy/rustfmt.
 * Never replace a file with a larger encoding unless `keep_larger`.
 * In-place writes: temp in the same dir → copy permissions → fsync → rename →
   best-effort dir fsync (Unix).
+  A symlink is written through: its target is replaced, the link stays.
 * `--backup` uses `create_new`; an existing `.orig` is left alone. Failed
   backup copies delete the partial `.orig`.
 * Lossless default; lossy is opt-in. CLI `--lossy` defaults `--min-savings` to
