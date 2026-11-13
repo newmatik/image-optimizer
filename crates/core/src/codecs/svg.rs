@@ -84,6 +84,60 @@ const SAFE_ELEMENTS: &[&str] = &[
     "style",
 ];
 
+/// CSS properties usvg applies from a `<style>` rule or a `style` attribute.
+/// Anything else (geometry such as `width` or `d`, `transform`, `color`,
+/// `overflow`, shorthands) is ignored or handled differently by usvg, so it is
+/// not static.
+const STATIC_CSS_PROPERTIES: &[&str] = &[
+    "fill",
+    "fill-opacity",
+    "fill-rule",
+    "stroke",
+    "stroke-opacity",
+    "stroke-width",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-miterlimit",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "opacity",
+    "clip-rule",
+    "clip-path",
+    "mask",
+    "filter",
+    "stop-color",
+    "stop-opacity",
+    "flood-color",
+    "flood-opacity",
+    "display",
+    "visibility",
+];
+
+/// Length units that depend on a font or on the viewport of the embedding
+/// page. usvg resolves them once with its own defaults.
+const CONTEXT_UNITS: &[&str] = &["rem", "em", "ex", "ch", "vw", "vh", "vmin", "vmax"];
+
+/// Attributes whose value is never a length list (and may be long).
+const NON_LENGTH_ATTRIBUTES: &[&str] = &["d", "id", "class", "href", "style"];
+
+/// Embedded raster images usvg carries over unchanged. An embedded SVG would
+/// be normalized by usvg without any of the checks in this module.
+const EMBEDDED_IMAGE_PREFIXES: &[&str] = &[
+    "data:image/png",
+    "data:image/jpeg",
+    "data:image/jpg",
+    "data:image/gif",
+    "data:image/webp",
+];
+
+/// Filter inputs usvg replaces with `SourceGraphic`.
+const UNSUPPORTED_FILTER_INPUTS: &[&str] = &[
+    "backgroundimage",
+    "backgroundalpha",
+    "fillpaint",
+    "strokepaint",
+];
+
 /// Conditional-processing attributes: usvg evaluates them once, for one
 /// language and feature set.
 const CONDITIONAL_ATTRIBUTES: &[&str] =
@@ -261,9 +315,32 @@ fn check_attribute(
         }
     }
 
+    // `xml:base` would make `#id` references resolve against another document.
+    if attr.namespace() == Some(XML_NS) && name == "base" {
+        return Err("SVG references an external resource".to_string());
+    }
+
+    // Same checks as on the raw markup, but on the decoded value: character
+    // references and entities are expanded here, as they are for usvg.
+    let decoded = attr.value().to_ascii_lowercase();
+    check_decoded_value(&decoded)?;
+    if name == "style" {
+        if !declarations_are_static(&decoded) {
+            return Err(dynamic_css_reason());
+        }
+    } else if !NON_LENGTH_ATTRIBUTES.contains(&name) && has_context_unit(&decoded) {
+        return Err("SVG uses font- or viewport-relative lengths".to_string());
+    }
+    if matches!(name, "in" | "in2") && UNSUPPORTED_FILTER_INPUTS.contains(&decoded.trim()) {
+        return Err("SVG filter uses an input that cannot be reproduced".to_string());
+    }
+
     if name == "href" {
         let value = attr.value().trim_start();
-        let embedded = matches!(element, "image" | "feImage") && value.starts_with("data:");
+        let embedded = matches!(element, "image" | "feImage")
+            && EMBEDDED_IMAGE_PREFIXES
+                .iter()
+                .any(|prefix| decoded.trim_start().starts_with(prefix));
         if !value.starts_with('#') && !embedded {
             return Err("SVG references an external resource".to_string());
         }
@@ -284,34 +361,87 @@ fn check_attribute(
     Ok(())
 }
 
+/// Context-dependent paint and external `url()` references in a decoded,
+/// lowercased attribute value or stylesheet.
+fn check_decoded_value(lower: &str) -> Result<(), String> {
+    if CONTEXT_MARKERS.iter().any(|m| lower.contains(m)) {
+        return Err(
+            "SVG uses context-dependent paint or CSS (currentColor, var(), vector-effect)"
+                .to_string(),
+        );
+    }
+    if has_external_url(lower) {
+        return Err("SVG references an external resource via url()".to_string());
+    }
+    Ok(())
+}
+
+fn dynamic_css_reason() -> String {
+    "SVG has CSS that depends on context or is not supported (at-rules, pseudo-classes, complex selectors, non-presentation properties)".to_string()
+}
+
+/// Whether a value contains a length in a font- or viewport-relative unit
+/// (`2em`, `50vw`). `lower` must already be lowercased.
+fn has_context_unit(lower: &str) -> bool {
+    lower
+        .split(|c: char| c.is_ascii_whitespace() || matches!(c, ',' | '(' | ')' | ';' | ':'))
+        .any(|token| {
+            CONTEXT_UNITS.iter().any(|unit| {
+                token
+                    .strip_suffix(unit)
+                    .is_some_and(|number| !number.is_empty() && plain_number(number).is_some())
+            })
+        })
+}
+
+/// Whether every `property: value` declaration is one usvg applies as written.
+/// `lower` must already be lowercased.
+fn declarations_are_static(lower: &str) -> bool {
+    lower
+        .split(';')
+        .filter(|d| !d.trim().is_empty())
+        .all(|declaration| match declaration.split_once(':') {
+            Some((property, value)) => {
+                STATIC_CSS_PROPERTIES.contains(&property.trim()) && !has_context_unit(value)
+            }
+            None => false,
+        })
+}
+
 fn metadata_reason(what: &str) -> String {
     format!("SVG has {what}, which optimizing would remove under the keep-all metadata policy")
 }
 
 /// A `<style>` element is only safe when usvg resolves all of it: plain
-/// type/class/id selectors with fixed declarations, for every medium.
+/// type/class/id selectors with fixed presentation declarations, for every
+/// medium. usvg reads only the element's first child and only if it is text,
+/// so a comment or a second text node would hide rules from it.
 fn check_style(node: roxmltree::Node<'_, '_>) -> Result<(), String> {
     if node.attribute("media").is_some() {
         return Err("SVG has a media-specific <style>".to_string());
     }
-    let css: String = node
-        .children()
-        .filter(|c| c.is_text())
-        .filter_map(|c| c.text())
-        .collect();
-    if css_is_static(&css) {
+    let mut children = node.children();
+    let css = match (children.next(), children.next()) {
+        (None, _) => return Ok(()),
+        (Some(only), None) if only.is_text() => only.text().unwrap_or(""),
+        _ => return Err("SVG has a <style> element with comments or mixed content".to_string()),
+    };
+    let lower = css.to_ascii_lowercase();
+    check_decoded_value(&lower)?;
+    if css_is_static(&lower) {
         Ok(())
     } else {
-        Err("SVG has CSS that depends on context or is not supported (at-rules, pseudo-classes, complex selectors)".to_string())
+        Err(dynamic_css_reason())
     }
 }
 
 /// Whether a stylesheet contains only rules usvg applies: no at-rules, no
-/// `!important`, and selectors built from type, class and id selectors with
-/// descendant/child combinators and grouping.
+/// `!important`, selectors built from type, class and id selectors with
+/// descendant/child combinators and grouping, and presentation declarations.
+/// `css` must already be lowercased.
 fn css_is_static(css: &str) -> bool {
     let css = strip_css_comments(css);
-    if css.contains('@') || css.to_ascii_lowercase().contains("!important") {
+    if css.contains('@') || css.contains("!important") {
         return false;
     }
     let mut rest = css.as_str();
@@ -332,7 +462,7 @@ fn css_is_static(css: &str) -> bool {
         let Some(close) = body.find('}') else {
             return false;
         };
-        if body[..close].contains('{') {
+        if body[..close].contains('{') || !declarations_are_static(&body[..close]) {
             return false;
         }
         rest = &body[close + 1..];
@@ -372,6 +502,10 @@ enum RootGeometry {
 }
 
 fn root_geometry(root: roxmltree::Node<'_, '_>) -> Result<RootGeometry, String> {
+    // usvg does not write `overflow` back; without it the root clips again.
+    if root.attribute("overflow").is_some() {
+        return Err("SVG root sets overflow".to_string());
+    }
     if let Some(par) = root.attribute("preserveAspectRatio") {
         let par = par.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
         if par != "xMidYMid" && par != "xMidYMid meet" {
@@ -565,6 +699,11 @@ mod tests {
         assert!(css_is_static("/* note */ rect{fill:red}"));
         assert!(css_is_static("  "));
 
+        // Geometry and other non-presentation properties are ignored by usvg.
+        assert!(!css_is_static("rect{width:10px}"));
+        assert!(!css_is_static(".a{transform:scale(2)}"));
+        assert!(!css_is_static(".a{stroke-width:2em}"));
+        assert!(!css_is_static(".a{fill}"));
         assert!(!css_is_static(
             "@media (prefers-color-scheme: dark){.a{fill:#000}}"
         ));
@@ -575,6 +714,16 @@ mod tests {
         assert!(!css_is_static(".a{fill:red !important}"));
         assert!(!css_is_static(".a{fill:red"));
         assert!(!css_is_static("/* open .a{fill:red}"));
+    }
+
+    #[test]
+    fn context_units_are_detected_in_lengths_only() {
+        assert!(has_context_unit("2em"));
+        assert!(has_context_unit("0 0 1.5rem 3"));
+        assert!(has_context_unit("translate(50vw,0)"));
+        assert!(!has_context_unit("24"));
+        assert!(!has_context_unit("12px 50%"));
+        assert!(!has_context_unit("item rem them"));
     }
 
     #[test]

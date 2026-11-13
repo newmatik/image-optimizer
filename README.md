@@ -148,15 +148,21 @@ Notes:
   all) allows the rebuild.
 * SVG is rewritten only when the file consists of static vector art the
   normalizer reproduces: shapes, groups, gradients, patterns, clips, masks,
-  markers, filters, embedded (`data:`) images, and plain `<style>` rules.
+  markers, filters, embedded raster (`data:`) images, and plain `<style>`
+  rules.
   Output is visually lossless, not byte-identical; the root `viewBox` is kept
   so the image still scales.
 * SVGs are skipped, untouched, when they contain `<text>`, links (`<a>`),
   `<switch>` or conditional attributes, scripting, `on*=` handlers, SMIL or
-  CSS animation, `<foreignObject>`, external references, `currentColor`,
-  `var()`, at-rules or pseudo-classes in CSS, or a root size the tool cannot
-  carry over (percent or unit lengths, no `viewBox` and no size, a
-  non-default `preserveAspectRatio`).
+  CSS animation, `<foreignObject>`, external references or `xml:base`,
+  embedded SVG images, `currentColor`, `var()`, CSS beyond plain presentation
+  rules (at-rules, pseudo-classes, geometry or `transform` properties, a
+  `<style>` with comments), font- or viewport-relative lengths (`em`, `vw`),
+  or a root the tool cannot carry over (percent or unit lengths, no `viewBox`
+  and no size, a non-default `preserveAspectRatio`, `overflow`).
+* The check is conservative, not a proof: the normalizer has no complete list
+  of what it ignores. Use `--dry-run` and review the diff for artwork that
+  matters.
 * `<title>`, `<desc>`, `role` and `aria-*` are content: such files are skipped
   unless `--strip all`. Comments and editor metadata (Inkscape, Illustrator,
   `<metadata>`) are removed unless `--strip none`, which skips those files.

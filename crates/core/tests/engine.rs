@@ -482,6 +482,35 @@ fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
         format!(r#"<svg {ns}><style>path:hover{{fill:blue}}</style>{VERBOSE_PATH}</svg>"#),
         // A namespace prefix must not bypass the gate.
         r#"<s:svg xmlns:s="http://www.w3.org/2000/svg" width="100" height="100"><s:text x="1" y="9">Hi</s:text></s:svg>"#.to_string(),
+        // Character references are decoded before usvg sees the value.
+        format!(r#"<svg {ns}><path d="M 0.000 0.000 L 9.000 9.000" stroke="current&#67;olor"/></svg>"#),
+        format!(
+            r#"<svg {ns}><style>.a{{fill:&#118;ar(--c, blue)}}</style><rect class="a" width="10.000" height="10.000"/></svg>"#
+        ),
+        // xml:base turns a local-looking reference into an external one.
+        format!(r##"<svg {ns} xml:base="sprites.svg">{VERBOSE_PATH}<use href="#icon"/></svg>"##),
+        // usvg reads only the first text child of <style>.
+        format!(
+            r#"<svg {ns}><style><!--x-->.a{{fill:#00ff00}}</style><rect class="a" width="20.000" height="10.000"/></svg>"#
+        ),
+        // CSS geometry is ignored by usvg.
+        format!(r#"<svg {ns}><rect style="width:100px;height:100px;fill:red"/>{VERBOSE_PATH}</svg>"#),
+        format!(r#"<svg {ns}><style>rect{{width:50px}}</style><rect height="10.000"/>{VERBOSE_PATH}</svg>"#),
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="width:200px;height:50px">{VERBOSE_PATH}</svg>"#
+        ),
+        // Font-relative lengths are frozen at usvg's default font size.
+        format!(r#"<svg {ns}><rect width="2em" height="2.000em" fill="red"/>{VERBOSE_PATH}</svg>"#),
+        // An embedded SVG would be normalized without any of these checks.
+        format!(
+            r#"<svg {ns}>{VERBOSE_PATH}<image width="64" height="16" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSIxNiI+PHRleHQgeD0iMCIgeT0iMTIiPkhlbGxvPC90ZXh0Pjwvc3ZnPg=="/></svg>"#
+        ),
+        // Root overflow is not written back, so the root would clip again.
+        format!(r#"<svg {ns} overflow="visible">{VERBOSE_PATH}</svg>"#),
+        // Filter inputs usvg replaces with SourceGraphic.
+        format!(
+            r##"<svg {ns}><filter id="f"><feComposite in="FillPaint" in2="SourceGraphic" operator="in"/></filter><g filter="url(#f)">{VERBOSE_PATH}</g></svg>"##
+        ),
         // A root without the SVG namespace must not skip the element checks.
         format!(r#"<svg width="100" height="100">{VERBOSE_PATH}<text x="1" y="9">Hi</text></svg>"#),
         // Sizes that depend on the embedding context.
@@ -555,6 +584,28 @@ fn svg_static_styles_and_internal_references_are_still_optimized() {
         "{text}"
     );
     assert!(text.contains("linearGradient"), "{text}");
+}
+
+#[test]
+fn svg_inline_presentation_style_and_embedded_raster_are_still_optimized() {
+    // A 1×1 PNG, embedded: usvg carries raster data over unchanged.
+    let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let input = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="100.000" height="100.000">
+  <rect style="fill:#ff0000; stroke-width: 2.000" x="0.000000" y="0.000000" width="50.000000" height="50.000000"/>
+  <rect style="fill:#00ff00" x="50.000000" y="50.000000" width="50.000000" height="50.000000"/>
+  <image width="10.000000" height="10.000000" href="{png}"/>
+  {VERBOSE_PATH}{VERBOSE_PATH}{VERBOSE_PATH}{VERBOSE_PATH}
+</svg>"#
+    );
+    let out = optimize_svg(&input, MetadataPolicy::default());
+    assert_eq!(out.status, OptimizeStatus::Optimized);
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(
+        text.contains("#ff0000") && text.contains("#00ff00"),
+        "{text}"
+    );
+    assert!(text.contains("data:image/png"), "{text}");
 }
 
 #[test]
