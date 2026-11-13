@@ -21,6 +21,13 @@
 //! fixed `width`/`height`. The codec restores an equivalent `viewBox` (and
 //! removes a size the source did not have) so the image keeps scaling.
 //!
+//! The XML parser recurses along element nesting, and usvg along nesting and
+//! `#id` references. A stack overflow is not a panic and cannot be caught, so
+//! nesting is bounded on the raw markup before anything is parsed, and
+//! documents whose longest nesting-and-reference chain exceeds
+//! [`MAX_STRUCTURE_DEPTH`] (or that contain a reference cycle) are skipped
+//! before usvg sees them.
+//!
 //! The gate is conservative but not a proof of equivalence: usvg has no list of
 //! everything it ignores. The output is visually lossless at the configured
 //! coordinate precision (8 decimals by default, 3 with `--lossy`), not
@@ -84,6 +91,11 @@ const SAFE_ELEMENTS: &[&str] = &[
     "style",
 ];
 
+/// Longest chain of nested elements and same-document references handed to
+/// usvg. Real artwork stays far below this; a debug build on a 2 MB thread
+/// stack overflows somewhere above 96 nested groups.
+const MAX_STRUCTURE_DEPTH: usize = 64;
+
 /// Conditional-processing attributes: usvg evaluates them once, for one
 /// language and feature set.
 const CONDITIONAL_ATTRIBUTES: &[&str] =
@@ -116,12 +128,21 @@ impl Optimizer for SvgOptimizer {
             return Ok(skipped("SVG references an external resource via url()"));
         }
 
+        // Must come before any XML parsing: the parser itself is recursive.
+        if let Err(reason) = check_raw_nesting(text) {
+            return Ok(CandidateSet::Skipped { reason });
+        }
+
         let parse_opts = roxmltree::ParsingOptions {
             allow_dtd: true,
             ..Default::default()
         };
         let doc = roxmltree::Document::parse_with_options(text, parse_opts)
             .map_err(|e| Error::Decode(format!("svg: {e}")))?;
+        // Bounds the recursion of every later step, including reference chains.
+        if let Err(reason) = check_structure_depth(&doc) {
+            return Ok(CandidateSet::Skipped { reason });
+        }
         if let Err(reason) = check_document(&doc, opts.metadata) {
             return Ok(CandidateSet::Skipped { reason });
         }
@@ -355,6 +376,203 @@ fn strip_css_comments(css: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+// --- structure depth ---------------------------------------------------------
+
+fn too_deep_reason() -> String {
+    format!("SVG nesting or reference chain is deeper than {MAX_STRUCTURE_DEPTH} levels")
+}
+
+/// Bound element nesting on the raw markup, without recursion and without an
+/// XML parser. The count is an upper bound: comments, CDATA and processing
+/// instructions are skipped so markup inside them cannot close real elements,
+/// and quoted attribute values cannot end a tag early.
+///
+/// Entities whose value contains markup could open elements this scan does not
+/// see, so such documents are rejected as well.
+fn check_raw_nesting(text: &str) -> Result<(), String> {
+    let bytes = text.as_bytes();
+    // Index just past the first `needle` at or after `from`, or the end.
+    let skip_past = |from: usize, needle: &str| -> usize {
+        text[from..]
+            .find(needle)
+            .map_or(bytes.len(), |rel| from + rel + needle.len())
+    };
+    // Index of the `>` that ends the tag starting at `from`, honoring quotes.
+    let tag_end = |from: usize| -> usize {
+        let mut quote = None;
+        for (offset, &b) in bytes[from..].iter().enumerate() {
+            match quote {
+                Some(q) if b == q => quote = None,
+                Some(_) => {}
+                None if b == b'"' || b == b'\'' => quote = Some(b),
+                None if b == b'>' => return from + offset,
+                None => {}
+            }
+        }
+        bytes.len()
+    };
+
+    let mut depth = 0usize;
+    let mut i = 0;
+    while let Some(rel) = text[i..].find('<') {
+        let start = i + rel;
+        let rest = &text[start..];
+        if rest.starts_with("<!--") {
+            i = skip_past(start + 4, "-->");
+        } else if rest.starts_with("<![CDATA[") {
+            i = skip_past(start + 9, "]]>");
+        } else if rest.starts_with("<?") {
+            i = skip_past(start + 2, "?>");
+        } else if rest.starts_with("<!ENTITY") {
+            let end = tag_end(start + 1);
+            let declaration = &text[start + 1..end];
+            if declaration.contains('<') || declaration.contains("&#") {
+                return Err("SVG declares an entity that contains markup".to_string());
+            }
+            i = end;
+        } else if rest.starts_with("<!") {
+            // DOCTYPE and other declarations: step inside, so entity
+            // declarations in an internal subset are still inspected.
+            i = start + 2;
+        } else if rest.starts_with("</") {
+            depth = depth.saturating_sub(1);
+            i = tag_end(start + 2);
+        } else {
+            let end = tag_end(start + 1);
+            let self_closing = end > start + 1 && bytes.get(end - 1) == Some(&b'/');
+            if !self_closing {
+                depth += 1;
+                if depth > MAX_STRUCTURE_DEPTH {
+                    return Err(too_deep_reason());
+                }
+            }
+            i = end;
+        }
+    }
+    Ok(())
+}
+
+/// Reject documents whose longest chain of nesting and `#id` references is
+/// deeper than [`MAX_STRUCTURE_DEPTH`], or cyclic. Runs without recursion, so
+/// it is safe on any input roxmltree accepted.
+fn check_structure_depth(doc: &roxmltree::Document<'_>) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut ids: HashMap<&str, roxmltree::NodeId> = HashMap::new();
+    let mut css_targets: Vec<&str> = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        if let Some(id) = node.attribute("id") {
+            ids.entry(id).or_insert(node.id());
+        }
+        if node.tag_name().name() == "style" {
+            for text in node.children().filter_map(|c| c.text()) {
+                css_targets.extend(url_reference_ids(text));
+            }
+        }
+    }
+
+    // Elements a node leads to: its children and everything it references.
+    let successors = |id: roxmltree::NodeId| -> Vec<roxmltree::NodeId> {
+        let Some(node) = doc.get_node(id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<_> = node
+            .children()
+            .filter(|c| c.is_element())
+            .map(|c| c.id())
+            .collect();
+        for attr in node.attributes() {
+            let value = attr.value();
+            if attr.name() == "href" {
+                if let Some(target) = value.trim().strip_prefix('#') {
+                    out.extend(ids.get(target));
+                }
+            }
+            out.extend(url_reference_ids(value).filter_map(|t| ids.get(t)));
+        }
+        out
+    };
+
+    // Longest path from each node, by depth-first search with an explicit
+    // stack. `open` holds the nodes on the current path to detect cycles.
+    struct Frame {
+        id: roxmltree::NodeId,
+        successors: Vec<roxmltree::NodeId>,
+        next: usize,
+        deepest_successor: usize,
+    }
+    let mut depth: HashMap<roxmltree::NodeId, usize> = HashMap::new();
+    let mut open: HashSet<roxmltree::NodeId> = HashSet::new();
+    let mut longest_from = |start: roxmltree::NodeId| -> Result<usize, String> {
+        if let Some(known) = depth.get(&start) {
+            return Ok(*known);
+        }
+        open.insert(start);
+        let mut stack = vec![Frame {
+            id: start,
+            successors: successors(start),
+            next: 0,
+            deepest_successor: 0,
+        }];
+        loop {
+            let frame = stack
+                .last_mut()
+                .expect("stack is non-empty inside the loop");
+            if let Some(&next) = frame.successors.get(frame.next) {
+                frame.next += 1;
+                if let Some(known) = depth.get(&next) {
+                    frame.deepest_successor = frame.deepest_successor.max(*known);
+                } else if !open.insert(next) {
+                    return Err("SVG has a reference cycle".to_string());
+                } else {
+                    stack.push(Frame {
+                        id: next,
+                        successors: successors(next),
+                        next: 0,
+                        deepest_successor: 0,
+                    });
+                }
+                continue;
+            }
+
+            let done = stack.pop().expect("frame was just inspected");
+            let own = done.deepest_successor + 1;
+            if own > MAX_STRUCTURE_DEPTH {
+                return Err(too_deep_reason());
+            }
+            open.remove(&done.id);
+            depth.insert(done.id, own);
+            match stack.last_mut() {
+                Some(parent) => parent.deepest_successor = parent.deepest_successor.max(own),
+                None => return Ok(own),
+            }
+        }
+    };
+
+    // Paint servers referenced from CSS apply to elements we do not resolve
+    // here, so count each of them on top of the document's own longest chain.
+    let mut total = longest_from(doc.root_element().id())?;
+    css_targets.sort_unstable();
+    css_targets.dedup();
+    for target in css_targets.iter().filter_map(|t| ids.get(t)) {
+        total += longest_from(*target)?;
+        if total > MAX_STRUCTURE_DEPTH {
+            return Err(too_deep_reason());
+        }
+    }
+    Ok(())
+}
+
+/// The ids of all `url(#id)` references in an attribute value or stylesheet.
+fn url_reference_ids(value: &str) -> impl Iterator<Item = &str> {
+    value.match_indices("url(").filter_map(move |(idx, _)| {
+        let rest = value[idx + 4..].trim_start_matches([' ', '\t', '\r', '\n', '"', '\'']);
+        let rest = rest.strip_prefix('#')?;
+        let end = rest.find([')', '"', '\'', ' ', '\t', '\r', '\n'])?;
+        Some(&rest[..end])
+    })
 }
 
 // --- root geometry -----------------------------------------------------------
@@ -591,6 +809,45 @@ mod tests {
         assert_eq!(parse_view_box("0 0 24"), None);
         assert_eq!(parse_view_box("0 0 0 24"), None);
         assert_eq!(parse_view_box("0 0 a 24"), None);
+    }
+
+    #[test]
+    fn raw_nesting_is_bounded_without_being_fooled_by_non_markup() {
+        let nested = |n: usize| format!("<svg>{}{}</svg>", "<g>".repeat(n), "</g>".repeat(n));
+        assert!(check_raw_nesting(&nested(MAX_STRUCTURE_DEPTH - 1)).is_ok());
+        assert!(check_raw_nesting(&nested(MAX_STRUCTURE_DEPTH)).is_err());
+
+        // Siblings and self-closing tags do not add depth.
+        let flat = format!("<svg>{}</svg>", "<g><path d='M0 0'/></g>".repeat(1_000));
+        assert!(check_raw_nesting(&flat).is_ok());
+
+        // Fake closers in comments, CDATA, PIs or attribute values must not
+        // lower the count.
+        for filler in [
+            "<!-- </g> -->",
+            "<![CDATA[ </g> ]]>",
+            "<?x </g> ?>",
+            "<path d='</g>'/>",
+        ] {
+            let hidden = format!("<svg>{}</svg>", format!("<g>{filler}").repeat(1_000));
+            assert!(check_raw_nesting(&hidden).is_err(), "{filler}");
+        }
+
+        // Plain-text entities are fine, markup entities are not.
+        let doctype =
+            |value: &str| format!(r#"<!DOCTYPE svg [ <!ENTITY e "{value}"> ]><svg>&e;</svg>"#);
+        assert!(check_raw_nesting(&doctype("http://www.w3.org/2000/svg")).is_ok());
+        assert!(check_raw_nesting(&doctype("<g><g>")).is_err());
+        assert!(check_raw_nesting(&doctype("&#60;g>")).is_err());
+    }
+
+    #[test]
+    fn url_reference_ids_are_extracted() {
+        let ids = |v| url_reference_ids(v).collect::<Vec<_>>();
+        assert_eq!(ids("url(#g)"), ["g"]);
+        assert_eq!(ids("fill:url( '#a' );stroke:url(\"#b\")"), ["a", "b"]);
+        assert!(ids("url(other.svg#g)").is_empty());
+        assert!(ids("url(#unterminated").is_empty());
     }
 
     #[test]

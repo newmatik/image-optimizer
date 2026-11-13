@@ -502,6 +502,69 @@ fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
     }
 }
 
+/// usvg recurses along nesting and references; a stack overflow would abort the
+/// whole process, so over-deep documents must be skipped before it runs.
+#[test]
+fn svg_with_excessive_nesting_or_reference_chains_is_skipped() {
+    let open = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">"#;
+    let path = r#"<path d="M0.0000 0.0000L24.0000 24.0000"/>"#;
+
+    // Far beyond anything a stack could take.
+    let nested = format!(
+        "{open}{}{path}{}</svg>",
+        "<g>".repeat(100_000),
+        "</g>".repeat(100_000)
+    );
+    assert_svg_skipped(&nested, MetadataPolicy::StripAll);
+
+    // Flat markup, deep only through a chain of <use> references.
+    let chain: String = (0..5_000)
+        .map(|i| format!(r##"<g id="a{i}"><use href="#a{}"/></g>"##, i + 1))
+        .collect();
+    let chained = format!(r#"{open}{chain}<path id="a5000" d="M0 0L24 24"/></svg>"#);
+    assert_svg_skipped(&chained, MetadataPolicy::StripAll);
+
+    // Deep only through paint-server references.
+    let patterns: String = (0..5_000)
+        .map(|i| {
+            format!(
+                r##"<pattern id="p{i}" width="4" height="4"><rect width="4" height="4" fill="url(#p{})"/></pattern>"##,
+                i + 1
+            )
+        })
+        .collect();
+    let painted = format!(
+        r##"{open}<defs>{patterns}<pattern id="p5000" width="4" height="4"/></defs><rect width="24" height="24" fill="url(#p0)"/></svg>"##
+    );
+    assert_svg_skipped(&painted, MetadataPolicy::StripAll);
+
+    // A reference cycle.
+    let cyclic =
+        format!(r##"{open}<g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g></svg>"##);
+    assert_svg_skipped(&cyclic, MetadataPolicy::StripAll);
+}
+
+#[test]
+fn svg_at_ordinary_depth_is_still_optimized() {
+    let open = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">"#;
+    // 40 nested groups plus a short <use> chain: deeper than real artwork,
+    // still inside the limit, and safe on a 2 MB test-thread stack.
+    let chain: String = (0..5)
+        .map(|i| format!(r##"<g id="a{i}"><use href="#a{}"/></g>"##, i + 1))
+        .collect();
+    let input = format!(
+        r#"{open}{}{chain}<path id="a5" d="M 0.000000 0.000000 L 24.000000 24.000000" stroke="red"/>{}</svg>"#,
+        "<g>".repeat(40),
+        "</g>".repeat(40)
+    );
+    let out = optimize_svg(&input, MetadataPolicy::default());
+    assert!(
+        !matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "ordinary depth must not be skipped: {:?}",
+        out.status
+    );
+}
+
 #[test]
 fn svg_view_box_survives_optimization() {
     // Icon style: viewBox only, no intrinsic size.
