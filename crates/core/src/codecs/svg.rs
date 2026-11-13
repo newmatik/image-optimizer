@@ -39,6 +39,11 @@ pub struct SvgOptimizer;
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
 const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+const XHTML_NS: &str = "http://www.w3.org/1999/xhtml";
+
+/// CSS-wide keywords that take the value from the embedding context for
+/// inherited properties such as `fill`.
+const CONTEXT_KEYWORDS: &[&str] = &["inherit", "unset", "revert", "revert-layer"];
 
 /// Element/marker substrings whose presence makes a normalize-and-reserialize
 /// unsafe. Kept in addition to the parsed-document gate as a second net for
@@ -253,6 +258,15 @@ fn check_element(node: roxmltree::Node<'_, '_>, policy: MetadataPolicy) -> Resul
     let name = node.tag_name().name();
 
     if node.tag_name().namespace() != Some(SVG_NS) {
+        // XHTML inside SVG is live content (a prefixed `script` runs), and a
+        // script hidden anywhere in a foreign subtree must not be dropped.
+        let live = node.descendants().filter(|n| n.is_element()).any(|n| {
+            n.tag_name().namespace() == Some(XHTML_NS)
+                || n.tag_name().name().eq_ignore_ascii_case("script")
+        });
+        if live {
+            return Err("SVG contains scripting or XHTML content".to_string());
+        }
         // Editor data (Inkscape, Illustrator, RDF): not rendered, dropped by
         // usvg. That is metadata (keep-all never gets here).
         return Ok(());
@@ -316,7 +330,7 @@ fn check_attribute(
     check_decoded_value(&decoded)?;
     // `inherit` takes the value from the embedding context once it reaches the
     // root; usvg resolves it against its own defaults.
-    if decoded.trim() == "inherit" {
+    if CONTEXT_KEYWORDS.contains(&decoded.trim()) {
         return Err("SVG inherits a presentation value from its context".to_string());
     }
     if name == "style" {
@@ -395,7 +409,8 @@ fn declarations_are_static(lower: &str) -> bool {
         .all(|declaration| match declaration.split_once(':') {
             Some((property, value)) => {
                 STATIC_CSS_PROPERTIES.contains(&property.trim())
-                    && value.trim() != "inherit"
+                    && !CONTEXT_KEYWORDS.contains(&value.trim())
+                    && !value.contains('!')
                     && !has_context_unit(value)
             }
             None => false,
@@ -699,6 +714,9 @@ mod tests {
         assert!(!css_is_static(".a{stroke-width:2em}"));
         assert!(!css_is_static(".a{fill}"));
         assert!(!css_is_static(".a{fill:inherit}"));
+        assert!(!css_is_static(".a{fill:unset}"));
+        assert!(!css_is_static(".a{fill:red ! important}"));
+        assert!(!declarations_are_static("fill:red !important"));
         assert!(!css_is_static(
             "@media (prefers-color-scheme: dark){.a{fill:#000}}"
         ));

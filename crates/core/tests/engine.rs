@@ -494,6 +494,14 @@ fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
         format!(
             r#"<svg {ns}><style type="TEXT/CSS">.a{{fill:#ff0000}}</style><rect class="a" width="20.000" height="10.000"/></svg>"#
         ),
+        format!(r#"<svg {ns} fill="unset">{VERBOSE_PATH}</svg>"#),
+        // A prefixed XHTML script runs in a browser; usvg would drop it.
+        format!(
+            r#"<svg {ns} xmlns:h="http://www.w3.org/1999/xhtml">{VERBOSE_PATH}<h:script>alert(1)</h:script></svg>"#
+        ),
+        format!(
+            r#"<svg {ns} xmlns:x="urn:example:x">{VERBOSE_PATH}<x:wrap><x:Script>1</x:Script></x:wrap></svg>"#
+        ),
         // xml:base turns a local-looking reference into an external one.
         format!(r##"<svg {ns} xml:base="sprites.svg">{VERBOSE_PATH}<use href="#icon"/></svg>"##),
         // usvg reads only the first text child of <style>.
