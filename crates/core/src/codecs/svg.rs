@@ -227,6 +227,9 @@ fn check_document(doc: &roxmltree::Document<'_>, policy: MetadataPolicy) -> Resu
             if node.pi().is_some_and(|pi| pi.target == "xml-stylesheet") {
                 return Err("SVG uses an external stylesheet".to_string());
             }
+            if keep_all(policy) {
+                return Err(metadata_reason("processing instructions"));
+            }
         } else if node.is_comment() && keep_all(policy) {
             return Err(metadata_reason("comments"));
         }
@@ -291,6 +294,8 @@ fn check_element(node: roxmltree::Node<'_, '_>, policy: MetadataPolicy) -> Resul
             check_element(child, policy)?;
         } else if child.is_comment() && keep_all(policy) {
             return Err(metadata_reason("comments"));
+        } else if child.is_pi() && keep_all(policy) {
+            return Err(metadata_reason("processing instructions"));
         }
     }
     Ok(())
@@ -324,6 +329,11 @@ fn check_attribute(
     // references and entities are expanded here, as they are for usvg.
     let decoded = attr.value().to_ascii_lowercase();
     check_decoded_value(&decoded)?;
+    // `inherit` takes the value from the embedding context once it reaches the
+    // root; usvg resolves it against its own defaults.
+    if decoded.trim() == "inherit" {
+        return Err("SVG inherits a presentation value from its context".to_string());
+    }
     if name == "style" {
         if !declarations_are_static(&decoded) {
             return Err(dynamic_css_reason());
@@ -402,7 +412,9 @@ fn declarations_are_static(lower: &str) -> bool {
         .filter(|d| !d.trim().is_empty())
         .all(|declaration| match declaration.split_once(':') {
             Some((property, value)) => {
-                STATIC_CSS_PROPERTIES.contains(&property.trim()) && !has_context_unit(value)
+                STATIC_CSS_PROPERTIES.contains(&property.trim())
+                    && value.trim() != "inherit"
+                    && !has_context_unit(value)
             }
             None => false,
         })
@@ -704,6 +716,7 @@ mod tests {
         assert!(!css_is_static(".a{transform:scale(2)}"));
         assert!(!css_is_static(".a{stroke-width:2em}"));
         assert!(!css_is_static(".a{fill}"));
+        assert!(!css_is_static(".a{fill:inherit}"));
         assert!(!css_is_static(
             "@media (prefers-color-scheme: dark){.a{fill:#000}}"
         ));

@@ -487,6 +487,9 @@ fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
         format!(
             r#"<svg {ns}><style>.a{{fill:&#118;ar(--c, blue)}}</style><rect class="a" width="10.000" height="10.000"/></svg>"#
         ),
+        // `inherit` on the way to the root takes its value from the page.
+        format!(r#"<svg {ns} fill="inherit">{VERBOSE_PATH}</svg>"#),
+        format!(r#"<svg {ns}><g style="stroke: inherit">{VERBOSE_PATH}</g></svg>"#),
         // xml:base turns a local-looking reference into an external one.
         format!(r##"<svg {ns} xml:base="sprites.svg">{VERBOSE_PATH}<use href="#icon"/></svg>"##),
         // usvg reads only the first text child of <style>.
@@ -626,6 +629,10 @@ fn svg_descriptive_content_follows_the_metadata_policy() {
         r#"<svg {ns} xmlns:ink="http://www.inkscape.org/namespaces/inkscape" ink:version="1.0"><!-- made by hand --><metadata><ink:x/></metadata><ink:view/>{VERBOSE_PATH}</svg>"#
     );
     assert_svg_skipped(&editor, MetadataPolicy::KeepAll);
+    let with_pi = format!(r#"<?editor v="1"?><svg {ns}>{VERBOSE_PATH}<?note x?></svg>"#);
+    assert_svg_skipped(&with_pi, MetadataPolicy::KeepAll);
+    let nested_pi = format!(r#"<svg {ns}>{VERBOSE_PATH}<?note x?></svg>"#);
+    assert_svg_skipped(&nested_pi, MetadataPolicy::KeepAll);
     let out = optimize_svg(&editor, MetadataPolicy::KeepColorProfile);
     assert_eq!(out.status, OptimizeStatus::Optimized);
     assert!(!String::from_utf8(out.bytes).unwrap().contains("ink"));
