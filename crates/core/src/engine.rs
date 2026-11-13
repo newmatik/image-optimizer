@@ -279,7 +279,9 @@ pub fn optimize_file(path: &Path, opts: &OptimizeOptions, sink: &OutputSink) -> 
                         return fail(format!("backup failed: {e}"));
                     }
                 }
-                if let Err(e) = atomic_write(path, &out.bytes) {
+                let written =
+                    in_place_target(path).and_then(|target| atomic_write(&target, &out.bytes));
+                if let Err(e) = written {
                     return fail(format!("write failed: {e}"));
                 }
             }
@@ -466,6 +468,18 @@ fn backup_original(path: &Path) -> std::io::Result<()> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+/// The file an in-place write has to replace. A rename replaces the directory
+/// entry it is given: for a symlink that would turn the link into a regular
+/// file and leave its target untouched, so in-place writes go to the target.
+/// Only the in-place sink does this; a directory sink must never write outside
+/// its root through a link that happens to exist there.
+fn in_place_target(path: &Path) -> std::io::Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => fs::canonicalize(path),
+        _ => Ok(path.to_path_buf()),
     }
 }
 

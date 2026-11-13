@@ -514,6 +514,76 @@ fn dry_run_leaves_file_untouched_inplace_writes_smaller() {
     assert!(image::load_from_memory(&std::fs::read(&path).unwrap()).is_ok());
 }
 
+/// A rename over a symlink would replace the link with a regular file and
+/// leave the real file unoptimized.
+#[cfg(unix)]
+#[test]
+fn in_place_write_follows_a_symlink_and_keeps_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let real_dir = dir.path().join("real");
+    let link_dir = dir.path().join("links");
+    std::fs::create_dir(&real_dir).unwrap();
+    std::fs::create_dir(&link_dir).unwrap();
+    let real = real_dir.join("img.png");
+    let link = link_dir.join("alias.png");
+    std::fs::write(&real, make_png()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let original_len = std::fs::metadata(&real).unwrap().len();
+
+    let r = optimize_file(
+        &link,
+        &OptimizeOptions::default(),
+        &OutputSink::InPlace { backup: false },
+    );
+
+    assert_eq!(r.status, OptimizeStatus::Optimized);
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link must stay a link"
+    );
+    let new_len = std::fs::metadata(&real).unwrap().len();
+    assert!(new_len < original_len, "target must be optimized");
+    assert_eq!(std::fs::read(&link).unwrap(), std::fs::read(&real).unwrap());
+    // No temp file left behind in either directory.
+    assert_eq!(std::fs::read_dir(&real_dir).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(&link_dir).unwrap().count(), 1);
+}
+
+/// The directory sink replaces the entry in its root. It must not follow a
+/// symlink that already sits there and overwrite a file outside the root.
+#[cfg(unix)]
+#[test]
+fn directory_sink_does_not_write_through_an_existing_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("img.png");
+    std::fs::write(&src, make_png()).unwrap();
+    let outside = dir.path().join("outside.png");
+    std::fs::write(&outside, b"unrelated").unwrap();
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+    let dst = out_dir.join("img.png");
+    std::os::unix::fs::symlink(&outside, &dst).unwrap();
+
+    let r = optimize_file(
+        &src,
+        &OptimizeOptions::default(),
+        &OutputSink::Directory {
+            root: out_dir.clone(),
+        },
+    );
+
+    assert_eq!(r.status, OptimizeStatus::Optimized);
+    assert_eq!(std::fs::read(&outside).unwrap(), b"unrelated");
+    assert!(!std::fs::symlink_metadata(&dst)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(image::load_from_memory(&std::fs::read(&dst).unwrap()).is_ok());
+}
+
 #[test]
 fn directory_sink_writes_to_dest_and_leaves_source_untouched() {
     let src_dir = tempfile::tempdir().unwrap();
