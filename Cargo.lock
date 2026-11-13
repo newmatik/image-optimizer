@@ -529,6 +529,7 @@ dependencies = [
  "mozjpeg-sys",
  "oxipng",
  "rayon",
+ "roxmltree 0.21.1",
  "tempfile",
  "thiserror",
  "usvg",

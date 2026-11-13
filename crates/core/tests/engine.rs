@@ -425,6 +425,159 @@ fn animated_gif_is_reported_as_skipped_not_already_optimal() {
     );
 }
 
+/// Optimize an SVG with the given metadata policy and return the result.
+fn optimize_svg(input: &str, metadata: MetadataPolicy) -> imageopt_core::OptimizedImage {
+    let opts = OptimizeOptions {
+        metadata,
+        ..Default::default()
+    };
+    optimize_bytes(input.as_bytes(), &opts).unwrap()
+}
+
+fn assert_svg_skipped(input: &str, metadata: MetadataPolicy) {
+    let out = optimize_svg(input, metadata);
+    assert!(
+        matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "expected a skip, got {:?} for {input}",
+        out.status
+    );
+    assert_eq!(
+        out.bytes,
+        input.as_bytes(),
+        "skipped SVG must be returned verbatim"
+    );
+}
+
+const VERBOSE_PATH: &str =
+    r#"<path d="M 3.000000 12.000000 L 12.000000 3.000000 L 21.000000 12.000000 Z" fill="red"/>"#;
+
+#[test]
+fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
+    let ns = r#"xmlns="http://www.w3.org/2000/svg" width="100" height="100""#;
+    let cases = [
+        // Text would be deleted: no fonts are loaded.
+        format!(r#"<svg {ns}>{VERBOSE_PATH}<text x="10" y="50">Hello</text></svg>"#),
+        // Links would be unwrapped.
+        format!(r#"<svg {ns}><a href="https://example.com/">{VERBOSE_PATH}</a></svg>"#),
+        // Context-dependent paint would be frozen to black.
+        format!(r#"<svg {ns}><path d="M 0.000 0.000 L 9.000 9.000" stroke="currentColor"/></svg>"#),
+        format!(
+            r#"<svg {ns}><path d="M 0.000 0.000 L 9.000 9.000" stroke="var(--c, blue)"/></svg>"#
+        ),
+        // External content would be deleted.
+        format!(
+            r#"<svg {ns}>{VERBOSE_PATH}<image href="photo.png" width="10" height="10"/></svg>"#
+        ),
+        format!(r#"<svg {ns}>{VERBOSE_PATH}<use href="sprite.svg#a"/></svg>"#),
+        format!(
+            r#"<svg {ns}><path d="M 0.000 0.000 L 9.000 9.000" fill="url(sprite.svg#g)"/></svg>"#
+        ),
+        // Conditional content would be resolved for one language.
+        format!(r#"<svg {ns}><switch><g systemLanguage="de">{VERBOSE_PATH}</g></switch></svg>"#),
+        format!(r#"<svg {ns}><g systemLanguage="de">{VERBOSE_PATH}</g></svg>"#),
+        // Dynamic CSS would be resolved once.
+        format!(
+            r#"<svg {ns}><style>.t{{fill:#333}} @media (prefers-color-scheme: dark){{.t{{fill:#eee}}}}</style>{VERBOSE_PATH}</svg>"#
+        ),
+        format!(r#"<svg {ns}><style>path:hover{{fill:blue}}</style>{VERBOSE_PATH}</svg>"#),
+        // A namespace prefix must not bypass the gate.
+        r#"<s:svg xmlns:s="http://www.w3.org/2000/svg" width="100" height="100"><s:text x="1" y="9">Hi</s:text></s:svg>"#.to_string(),
+        // Sizes that depend on the embedding context.
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">{VERBOSE_PATH}</svg>"#
+        ),
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg">{VERBOSE_PATH}</svg>"#),
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 100 100">{VERBOSE_PATH}</svg>"#
+        ),
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" preserveAspectRatio="none">{VERBOSE_PATH}</svg>"#
+        ),
+    ];
+    for case in &cases {
+        // Not even strip-all may rewrite these.
+        assert_svg_skipped(case, MetadataPolicy::StripAll);
+    }
+}
+
+#[test]
+fn svg_view_box_survives_optimization() {
+    // Icon style: viewBox only, no intrinsic size.
+    let icon = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{VERBOSE_PATH}</svg>"#
+    );
+    let out = optimize_svg(&icon, MetadataPolicy::default());
+    assert_eq!(out.status, OptimizeStatus::Optimized);
+    let text = String::from_utf8(out.bytes.clone()).unwrap();
+    assert!(
+        text.starts_with(r#"<svg viewBox="0 0 24 24" "#),
+        "viewBox-only root must stay viewBox-only: {text}"
+    );
+
+    // Sized and scaled: 400×200 user units shown at 200×100.
+    let sized = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="200.000" height="100.000" viewBox="0 0 400 200">{VERBOSE_PATH}{VERBOSE_PATH}{VERBOSE_PATH}</svg>"#
+    );
+    let out = optimize_svg(&sized, MetadataPolicy::default());
+    assert_eq!(out.status, OptimizeStatus::Optimized);
+    let text = String::from_utf8(out.bytes.clone()).unwrap();
+    assert!(
+        text.starts_with(r#"<svg width="200" height="100" viewBox="0 0 200 100" "#),
+        "sized root must keep an equivalent viewBox: {text}"
+    );
+
+    // Idempotent: the restored root must not trigger another rewrite.
+    let again = optimize_bytes(&out.bytes, &OptimizeOptions::default()).unwrap();
+    assert_eq!(again.status, OptimizeStatus::AlreadyOptimal);
+}
+
+#[test]
+fn svg_static_styles_and_internal_references_are_still_optimized() {
+    let input = r##"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="100">
+  <style>.a{fill:#ff0000} g > .b { fill: #00ff00 }</style>
+  <defs>
+    <linearGradient id="g"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient>
+    <rect id="r" width="10.000000" height="10.000000"/>
+  </defs>
+  <rect class="a" x="0.000000" y="0.000000" width="50.000000" height="50.000000"/>
+  <g><rect class="b" x="50.000000" y="50.000000" width="50.000000" height="50.000000"/></g>
+  <use xlink:href="#r" x="20.000000" y="20.000000" fill="url(#g)"/>
+</svg>"##;
+    let out = optimize_svg(input, MetadataPolicy::default());
+    assert_eq!(out.status, OptimizeStatus::Optimized);
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(
+        text.contains("#ff0000") && text.contains("#00ff00"),
+        "{text}"
+    );
+    assert!(text.contains("linearGradient"), "{text}");
+}
+
+#[test]
+fn svg_descriptive_content_follows_the_metadata_policy() {
+    let ns = r#"xmlns="http://www.w3.org/2000/svg" width="100" height="100""#;
+    let titled = format!(r#"<svg {ns}><title>Home</title>{VERBOSE_PATH}</svg>"#);
+    let labelled = format!(r#"<svg {ns} role="img" aria-label="Home">{VERBOSE_PATH}</svg>"#);
+    for input in [&titled, &labelled] {
+        // Accessible names are content: only strip-all removes them.
+        assert_svg_skipped(input, MetadataPolicy::KeepColorProfile);
+        assert_svg_skipped(input, MetadataPolicy::KeepAll);
+        let out = optimize_svg(input, MetadataPolicy::StripAll);
+        assert_eq!(out.status, OptimizeStatus::Optimized);
+    }
+
+    // Editor data is metadata: removed by default, kept under keep-all.
+    let editor = format!(
+        r#"<svg {ns} xmlns:ink="http://www.inkscape.org/namespaces/inkscape" ink:version="1.0"><!-- made by hand --><metadata><ink:x/></metadata><ink:view/>{VERBOSE_PATH}</svg>"#
+    );
+    assert_svg_skipped(&editor, MetadataPolicy::KeepAll);
+    let out = optimize_svg(&editor, MetadataPolicy::KeepColorProfile);
+    assert_eq!(out.status, OptimizeStatus::Optimized);
+    assert!(!String::from_utf8(out.bytes).unwrap().contains("ink"));
+}
+
 #[test]
 fn unsafe_svg_is_reported_as_skipped_not_already_optimal() {
     let input =
