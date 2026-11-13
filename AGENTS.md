@@ -104,9 +104,9 @@ pins `stable` plus clippy/rustfmt.
 * Do not treat GitHub Action smoke as proof the current branch’s CLI works.
 * Do not “upgrade” `dtolnay/rust-toolchain` in Dependabot for the MSRV job
   (see `.github/dependabot.yml`); that pin is the Rust version, not an action tag.
-* Do not remove `RUSTSEC-2026-0192` / `RUSTSEC-2026-0206` ignores in
-  `deny.toml` and `.cargo/audit.toml` until usvg drops rustybuzz/fontdb.
-  Keep the two files in sync.
+* Do not add a RustSec ignore to only one of `deny.toml` and
+  `.cargo/audit.toml`: keep the two lists in sync, give each entry a reason,
+  and remove it once `cargo deny check` reports it as not encountered.
 * Do not rewrite working codec code for style.
 
 ## Tests
@@ -123,5 +123,9 @@ pins `stable` plus clippy/rustfmt.
 Tag `vX.Y.Z` must match workspace `version`. `release.yml` builds the matrix,
 checksums, then one publish job. Composite action verifies `*.sha256` before
 exec.
+
+After a release, update the `uses: newmatik/image-optimizer@vX.Y.Z` examples in
+the README to the new tag and drop the note about what the previous tag's
+wrapper lacks. Only full version tags exist; there is no `v1`.
 
 License: GPL-3.0-or-later (libimagequant).

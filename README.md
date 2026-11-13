@@ -169,15 +169,14 @@ Notes:
 
 ## GitHub Action
 
-Composite action (Linux, macOS, Windows). It downloads a **release** binary
-(the action ref if that tag exists, else `latest`), verifies the SHA-256, and
-runs it — it does not compile the PR.
+Composite action. It downloads a **release** binary (the action ref if that
+tag exists, else `latest`) and runs it — it does not compile the PR.
 
 Optimize and commit:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: newmatik/image-optimizer@v1
+- uses: newmatik/image-optimizer@v0.2.1
   with:
     paths: "src/assets"
     recursive: "true"
@@ -193,12 +192,18 @@ Lint gate (fail the PR if images can still shrink):
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: newmatik/image-optimizer@v1
+- uses: newmatik/image-optimizer@v0.2.1
   with:
     paths: "src/assets"
     recursive: "true"
     check: "true"
 ```
+
+Pin a release tag (see [Releases](https://github.com/newmatik/image-optimizer/releases));
+there is no moving major tag such as `v1`. The tag also selects the wrapper:
+the one in `v0.2.1` runs on Linux and macOS only and does not verify the
+checksum. Windows runners and SHA-256 verification are on `main` and ship with
+the next release.
 
 Inputs: `paths` (required), `lossy`, `quality`, `min-savings`, `recursive`,
 `strip`, `check`, `dry-run`, `json`, `version`, `extra-args`.
