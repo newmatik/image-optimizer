@@ -30,6 +30,10 @@ Add an optional in-flight byte budget to the batch engine.
 - A file larger than the whole budget is still admitted alone: acquire requests
   are clamped to the budget so the semaphore can never deadlock.
 - The CLI exposes this as `--max-in-flight-mb <MB>`.
+- The budget is awaited on one plain thread that admits the files and hands
+  them to the pool, never on a pool worker (amended 2026-11-13). A worker that
+  waits for a nested job runs other jobs meanwhile; blocking it on the budget
+  could strand a codec task below it on the same stack and stall the batch.
 
 On-disk size is used as a proxy for memory cost. It is imperfect (a small
 compressed PNG can decode to a large pixel buffer), but it is cheap to obtain

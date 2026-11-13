@@ -379,7 +379,8 @@ impl Drop for InFlightPermit<'_> {
 ///
 /// When [`OptimizeOptions::max_in_flight_bytes`] is set, the combined size of
 /// files being processed concurrently is throttled to that budget so a batch of
-/// large images does not exhaust memory.
+/// large images does not exhaust memory. Files are then admitted in input
+/// order.
 pub fn optimize_paths<F>(
     paths: &[PathBuf],
     opts: &OptimizeOptions,
@@ -390,38 +391,77 @@ where
     F: Fn(ProgressEvent) + Sync + Send,
 {
     let total = paths.len();
-    let budget = opts
-        .max_in_flight_bytes
-        .filter(|b| *b > 0)
-        .map(ByteSemaphore::new);
-    let budget = budget.as_ref();
+    // `permit` is the file's share of the byte budget, if there is one. It is
+    // dropped before `Finished` so a callback that waits on another worker
+    // cannot hold budget back; RAII still releases it on a panic.
+    let run = |index: usize, path: &PathBuf, permit: Option<InFlightPermit<'_>>| {
+        progress(ProgressEvent::Started {
+            index,
+            total,
+            name: path.display().to_string(),
+        });
+        let res = optimize_file(path, opts, sink);
+        drop(permit);
+        progress(ProgressEvent::Finished { index, total });
+        res
+    };
 
-    let mut indexed: Vec<(usize, OptimizeResult)> = paths
-        .par_iter()
-        .enumerate()
-        .map(|(index, path)| {
-            progress(ProgressEvent::Started {
-                index,
-                total,
-                name: path.display().to_string(),
-            });
-            // Throttle on the file's on-disk size (a proxy for its memory cost)
-            // when a budget is configured. Drop the permit before Finished so a
-            // callback that waits on another worker cannot deadlock against
-            // acquire. RAII still releases on panic inside optimize_file.
-            let res = {
-                let _permit = budget.map(|sem| {
+    let Some(budget) = opts.max_in_flight_bytes.filter(|b| *b > 0) else {
+        // An indexed parallel iterator collects in input order.
+        return paths
+            .par_iter()
+            .enumerate()
+            .map(|(index, path)| run(index, path, None))
+            .collect();
+    };
+
+    // The budget must never be awaited on a pool worker. A worker that waits
+    // for a nested job runs other jobs meanwhile; if it took the next file and
+    // blocked on the budget, a codec task suspended below it on the same stack
+    // could not finish, and the file holding the budget may be waiting for
+    // exactly that task (oxipng evaluates candidates on the pool). So one
+    // plain thread admits the files: it takes the budget, then hands the file
+    // to the pool. Pool workers only ever release budget.
+    let semaphore = ByteSemaphore::new(budget);
+    let slots: Mutex<Vec<Option<OptimizeResult>>> = Mutex::new(vec![None; total]);
+    std::thread::scope(|threads| {
+        threads.spawn(|| {
+            rayon::in_place_scope(|pool| {
+                for (index, path) in paths.iter().enumerate() {
+                    // On-disk size is the proxy for a file's memory cost.
                     let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                    sem.acquire(size)
-                });
-                optimize_file(path, opts, sink)
-            };
-            progress(ProgressEvent::Finished { index, total });
-            (index, res)
+                    let permit = semaphore.acquire(size);
+                    let (run, slots) = (&run, &slots);
+                    pool.spawn(move |_| {
+                        let res = run(index, path, Some(permit));
+                        slots.lock().unwrap_or_else(|e| e.into_inner())[index] = Some(res);
+                    });
+                }
+            });
+        });
+    });
+
+    slots
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+        .into_iter()
+        .zip(paths)
+        .map(|(slot, path)| {
+            // Every job fills its slot; a panic in one would have propagated.
+            slot.unwrap_or_else(|| {
+                result(
+                    path,
+                    ImageFormat::Unknown,
+                    0,
+                    0,
+                    OptimizeStatus::Failed {
+                        error: "file was not processed".to_string(),
+                    },
+                    Instant::now(),
+                )
+            })
         })
-        .collect();
-    indexed.sort_by_key(|(i, _)| *i);
-    indexed.into_iter().map(|(_, r)| r).collect()
+        .collect()
 }
 
 // --- helpers ---------------------------------------------------------------
