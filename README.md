@@ -160,6 +160,9 @@ Notes:
   `<style>` with comments), font- or viewport-relative lengths (`em`, `vw`),
   or a root the tool cannot carry over (percent or unit lengths, no `viewBox`
   and no size, a non-default `preserveAspectRatio`, `overflow`).
+* SVGs nested or cross-referenced deeper than 64 levels, with a reference
+  cycle, or with entities that contain markup are skipped as well (they
+  could exhaust the stack).
 * The check is conservative, not a proof: the normalizer has no complete list
   of what it ignores. Use `--dry-run` and review the diff for artwork that
   matters.

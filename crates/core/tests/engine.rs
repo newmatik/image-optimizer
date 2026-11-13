@@ -502,6 +502,23 @@ fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
         format!(
             r#"<svg {ns} xmlns:x="urn:example:x">{VERBOSE_PATH}<x:wrap><x:Script>1</x:Script></x:wrap></svg>"#
         ),
+        // Valid CSS colors usvg cannot parse would turn black.
+        format!(r#"<svg {ns}><path d="M 0.000 0.000 L 9.000 9.000" stroke="color(srgb 1 0 0)"/></svg>"#),
+        // usvg ignores pathLength, which rescales the dash pattern.
+        format!(
+            r#"<svg {ns}><path pathLength="1" stroke="red" stroke-dasharray="0.5 0.5" d="M 0.000 50.000 L 100.000 50.000"/></svg>"#
+        ),
+        // A root transform sits outside the viewBox mapping.
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100" transform="translate(10 0)">{VERBOSE_PATH}</svg>"#
+        ),
+        // usvg applies a foreign <style> by local name before dropping it.
+        format!(
+            r#"<svg {ns} xmlns:x="urn:example:editor"><x:editor><x:style>path{{fill:blue}}</x:style></x:editor>{VERBOSE_PATH}</svg>"#
+        ),
+        format!(
+            r#"<svg {ns} xmlns:x="urn:example:editor"><metadata><x:style>path{{fill:blue}}</x:style></metadata>{VERBOSE_PATH}</svg>"#
+        ),
         // xml:base turns a local-looking reference into an external one.
         format!(r##"<svg {ns} xml:base="sprites.svg">{VERBOSE_PATH}<use href="#icon"/></svg>"##),
         // usvg reads only the first text child of <style>.
@@ -544,6 +561,69 @@ fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
         // Not even strip-all may rewrite these.
         assert_svg_skipped(case, MetadataPolicy::StripAll);
     }
+}
+
+/// usvg recurses along nesting and references; a stack overflow would abort the
+/// whole process, so over-deep documents must be skipped before it runs.
+#[test]
+fn svg_with_excessive_nesting_or_reference_chains_is_skipped() {
+    let open = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">"#;
+    let path = r#"<path d="M0.0000 0.0000L24.0000 24.0000"/>"#;
+
+    // Far beyond anything a stack could take.
+    let nested = format!(
+        "{open}{}{path}{}</svg>",
+        "<g>".repeat(100_000),
+        "</g>".repeat(100_000)
+    );
+    assert_svg_skipped(&nested, MetadataPolicy::StripAll);
+
+    // Flat markup, deep only through a chain of <use> references.
+    let chain: String = (0..5_000)
+        .map(|i| format!(r##"<g id="a{i}"><use href="#a{}"/></g>"##, i + 1))
+        .collect();
+    let chained = format!(r#"{open}{chain}<path id="a5000" d="M0 0L24 24"/></svg>"#);
+    assert_svg_skipped(&chained, MetadataPolicy::StripAll);
+
+    // Deep only through paint-server references.
+    let patterns: String = (0..5_000)
+        .map(|i| {
+            format!(
+                r##"<pattern id="p{i}" width="4" height="4"><rect width="4" height="4" fill="url(#p{})"/></pattern>"##,
+                i + 1
+            )
+        })
+        .collect();
+    let painted = format!(
+        r##"{open}<defs>{patterns}<pattern id="p5000" width="4" height="4"/></defs><rect width="24" height="24" fill="url(#p0)"/></svg>"##
+    );
+    assert_svg_skipped(&painted, MetadataPolicy::StripAll);
+
+    // A reference cycle.
+    let cyclic =
+        format!(r##"{open}<g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g></svg>"##);
+    assert_svg_skipped(&cyclic, MetadataPolicy::StripAll);
+}
+
+#[test]
+fn svg_at_ordinary_depth_is_still_optimized() {
+    let open = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">"#;
+    // 40 nested groups plus a short <use> chain: deeper than real artwork,
+    // still inside the limit, and safe on a 2 MB test-thread stack.
+    let chain: String = (0..5)
+        .map(|i| format!(r##"<g id="a{i}"><use href="#a{}"/></g>"##, i + 1))
+        .collect();
+    let input = format!(
+        r#"{open}{}{chain}<path id="a5" d="M 0.000000 0.000000 L 24.000000 24.000000" stroke="red"/>{}</svg>"#,
+        "<g>".repeat(40),
+        "</g>".repeat(40)
+    );
+    let out = optimize_svg(&input, MetadataPolicy::default());
+    assert!(
+        !matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "ordinary depth must not be skipped: {:?}",
+        out.status
+    );
 }
 
 #[test]
@@ -590,6 +670,7 @@ fn svg_static_styles_and_internal_references_are_still_optimized() {
   <rect class="a" x="0.000000" y="0.000000" width="50.000000" height="50.000000"/>
   <g><rect class="b" x="50.000000" y="50.000000" width="50.000000" height="50.000000"/></g>
   <use xlink:href="#r" x="20.000000" y="20.000000" fill="url(#g)"/>
+  <g transform="translate(5.000000 5.000000) rotate(45.000000)"><rect fill="rgb(0, 0, 255)" width="5.000000" height="5.000000"/></g>
 </svg>"##;
     let out = optimize_svg(input, MetadataPolicy::default());
     assert_eq!(out.status, OptimizeStatus::Optimized);
