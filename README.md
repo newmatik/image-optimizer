@@ -165,7 +165,7 @@ Notes:
   matters.
 * `<title>`, `<desc>`, `role` and `aria-*` are content: such files are skipped
   unless `--strip all`. Comments and editor metadata (Inkscape, Illustrator,
-  `<metadata>`) are removed unless `--strip none`, which skips those files.
+  `<metadata>`) are removed. With `--strip none` no SVG is rewritten.
 * `class` attributes are resolved against the file's own `<style>` and then
   removed. Do not run the tool on SVGs that a page styles from outside.
 * AVIF is detected and skipped until an optimizer exists.

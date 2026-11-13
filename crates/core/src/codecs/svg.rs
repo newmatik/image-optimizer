@@ -15,7 +15,8 @@
 //! * Context-dependent paint and CSS (`currentColor`, `var()`, at-rules,
 //!   pseudo-classes) is skipped: usvg would freeze it to one value.
 //! * `<title>`/`<desc>` and accessibility attributes are only dropped under the
-//!   strip-all policy; editor metadata is dropped unless the policy is keep-all.
+//!   strip-all policy. Under keep-all no SVG is rewritten, because comments,
+//!   editor data and unknown attributes never survive normalization.
 //!
 //! usvg also flattens the root `viewBox` into a transform and always writes a
 //! fixed `width`/`height`. The codec restores an equivalent `viewBox` (and
@@ -151,6 +152,15 @@ impl Optimizer for SvgOptimizer {
             Err(_) => return Ok(skipped("SVG input is not UTF-8 and was left untouched")),
         };
 
+        // Normalizing drops comments, editor data, unknown attributes and
+        // processing instructions. Nothing of that can be kept, so keep-all
+        // means: leave SVG alone.
+        if keep_all(opts.metadata) {
+            return Ok(skipped(
+                "SVG normalization cannot keep all metadata (keep-all policy)",
+            ));
+        }
+
         let lower = text.to_ascii_lowercase();
         if UNSAFE_MARKERS.iter().any(|m| lower.contains(m))
             || has_event_handler(&lower)
@@ -227,11 +237,6 @@ fn check_document(doc: &roxmltree::Document<'_>, policy: MetadataPolicy) -> Resu
             if node.pi().is_some_and(|pi| pi.target == "xml-stylesheet") {
                 return Err("SVG uses an external stylesheet".to_string());
             }
-            if keep_all(policy) {
-                return Err(metadata_reason("processing instructions"));
-            }
-        } else if node.is_comment() && keep_all(policy) {
-            return Err(metadata_reason("comments"));
         }
     }
     // Only foreign *descendants* are editor data. A root that is not an
@@ -249,22 +254,12 @@ fn check_element(node: roxmltree::Node<'_, '_>, policy: MetadataPolicy) -> Resul
 
     if node.tag_name().namespace() != Some(SVG_NS) {
         // Editor data (Inkscape, Illustrator, RDF): not rendered, dropped by
-        // usvg. That is metadata, so only keep-all forbids it.
-        return if keep_all(policy) {
-            Err(metadata_reason("editor data"))
-        } else {
-            Ok(())
-        };
+        // usvg. That is metadata (keep-all never gets here).
+        return Ok(());
     }
 
     match name {
-        "metadata" => {
-            return if keep_all(policy) {
-                Err(metadata_reason("<metadata>"))
-            } else {
-                Ok(())
-            };
-        }
+        "metadata" => return Ok(()),
         // Accessible name and description: content, not editor cruft.
         "title" | "desc" => {
             return if matches!(policy, MetadataPolicy::StripAll) {
@@ -292,10 +287,6 @@ fn check_element(node: roxmltree::Node<'_, '_>, policy: MetadataPolicy) -> Resul
     for child in node.children() {
         if child.is_element() {
             check_element(child, policy)?;
-        } else if child.is_comment() && keep_all(policy) {
-            return Err(metadata_reason("comments"));
-        } else if child.is_pi() && keep_all(policy) {
-            return Err(metadata_reason("processing instructions"));
         }
     }
     Ok(())
@@ -311,13 +302,7 @@ fn check_attribute(
         None => {}
         Some(XLINK_NS) | Some(XML_NS) => {}
         // Editor attributes such as `inkscape:label`.
-        Some(_) => {
-            return if keep_all(policy) {
-                Err(metadata_reason("editor data"))
-            } else {
-                Ok(())
-            };
-        }
+        Some(_) => return Ok(()),
     }
 
     // `xml:base` would make `#id` references resolve against another document.
@@ -364,9 +349,6 @@ fn check_attribute(
             "SVG has accessibility attributes, which are only removed with strip-all metadata"
                 .to_string(),
         );
-    }
-    if name.starts_with("data-") && keep_all(policy) {
-        return Err(metadata_reason("data-* attributes"));
     }
     Ok(())
 }
@@ -420,10 +402,6 @@ fn declarations_are_static(lower: &str) -> bool {
         })
 }
 
-fn metadata_reason(what: &str) -> String {
-    format!("SVG has {what}, which optimizing would remove under the keep-all metadata policy")
-}
-
 /// A `<style>` element is only safe when usvg resolves all of it: plain
 /// type/class/id selectors with fixed presentation declarations, for every
 /// medium. usvg reads only the element's first child and only if it is text,
@@ -431,6 +409,10 @@ fn metadata_reason(what: &str) -> String {
 fn check_style(node: roxmltree::Node<'_, '_>) -> Result<(), String> {
     if node.attribute("media").is_some() {
         return Err("SVG has a media-specific <style>".to_string());
+    }
+    // usvg applies a typed stylesheet only for this exact spelling.
+    if node.attribute("type").is_some_and(|t| t != "text/css") {
+        return Err("SVG has a <style> with an unsupported type".to_string());
     }
     let mut children = node.children();
     let css = match (children.next(), children.next()) {

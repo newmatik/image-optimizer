@@ -72,8 +72,8 @@ pins `stable` plus clippy/rustfmt.
   everything usvg would drop or freeze (text, links, script, animation,
   foreignObject, external references, `currentColor`, `var()`, dynamic CSS).
   The root `viewBox` and the absence of `width`/`height` must survive.
-  `<title>`/`<desc>`/`aria-*` go only with strip-all; editor metadata stays
-  only with keep-all (skip).
+  `<title>`/`<desc>`/`aria-*` go only with strip-all; keep-all skips every
+  SVG.
 * AVIF: detect, skip, no optimizer yet.
 * `optimize_paths` preserves input order. `--max-in-flight-mb` is a byte
   semaphore on on-disk size; a file larger than the budget still runs alone.

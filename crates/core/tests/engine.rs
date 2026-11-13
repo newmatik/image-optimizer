@@ -490,6 +490,10 @@ fn svg_constructs_usvg_cannot_reproduce_are_skipped() {
         // `inherit` on the way to the root takes its value from the page.
         format!(r#"<svg {ns} fill="inherit">{VERBOSE_PATH}</svg>"#),
         format!(r#"<svg {ns}><g style="stroke: inherit">{VERBOSE_PATH}</g></svg>"#),
+        // usvg only applies a stylesheet typed exactly `text/css`.
+        format!(
+            r#"<svg {ns}><style type="TEXT/CSS">.a{{fill:#ff0000}}</style><rect class="a" width="20.000" height="10.000"/></svg>"#
+        ),
         // xml:base turns a local-looking reference into an external one.
         format!(r##"<svg {ns} xml:base="sprites.svg">{VERBOSE_PATH}<use href="#icon"/></svg>"##),
         // usvg reads only the first text child of <style>.
@@ -624,15 +628,15 @@ fn svg_descriptive_content_follows_the_metadata_policy() {
         assert_eq!(out.status, OptimizeStatus::Optimized);
     }
 
-    // Editor data is metadata: removed by default, kept under keep-all.
+    // Editor data is metadata: removed by default.
     let editor = format!(
         r#"<svg {ns} xmlns:ink="http://www.inkscape.org/namespaces/inkscape" ink:version="1.0"><!-- made by hand --><metadata><ink:x/></metadata><ink:view/>{VERBOSE_PATH}</svg>"#
     );
+    // Keep-all cannot be honoured by a normalizer, so nothing is rewritten:
+    // not editor data, and not a file with a custom attribute either.
     assert_svg_skipped(&editor, MetadataPolicy::KeepAll);
-    let with_pi = format!(r#"<?editor v="1"?><svg {ns}>{VERBOSE_PATH}<?note x?></svg>"#);
-    assert_svg_skipped(&with_pi, MetadataPolicy::KeepAll);
-    let nested_pi = format!(r#"<svg {ns}>{VERBOSE_PATH}<?note x?></svg>"#);
-    assert_svg_skipped(&nested_pi, MetadataPolicy::KeepAll);
+    let plain = format!(r#"<svg {ns} custom="x" xml:lang="en">{VERBOSE_PATH}{VERBOSE_PATH}</svg>"#);
+    assert_svg_skipped(&plain, MetadataPolicy::KeepAll);
     let out = optimize_svg(&editor, MetadataPolicy::KeepColorProfile);
     assert_eq!(out.status, OptimizeStatus::Optimized);
     assert!(!String::from_utf8(out.bytes).unwrap().contains("ink"));
