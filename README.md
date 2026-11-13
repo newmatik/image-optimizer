@@ -135,7 +135,7 @@ message is in `error`. Skipped files do not fail `--check`; failed files do.
 | JPEG | DCT coefficient re-write (progressive, optimized Huffman) | re-encode at quality | mozjpeg |
 | PNG  | IDAT recompress + reductions (Zopfli at `--png-level 6`) | palette quantization | oxipng + libimagequant |
 | WebP | lossless re-encode when it cannot drop kept metadata | re-encode at quality | libwebp |
-| SVG  | normalize + minify static vector art; anything else is skipped | reduced coordinate precision | usvg |
+| SVG  | minify the markup: layout whitespace, comments, editor data, redundant digits | coordinates rounded to 3 decimals | own minifier (roxmltree) |
 | GIF  | static GIFs re-encoded losslessly | — | gif (pure Rust) |
 
 Notes:
@@ -146,31 +146,33 @@ Notes:
   the policy is keep-color (the lossless default), it is skipped rather than
   stripping the profile. `--strip all` or `--lossy` (which defaults to strip
   all) allows the rebuild.
-* SVG is rewritten only when the file consists of static vector art the
-  normalizer reproduces: shapes, groups, gradients, patterns, clips, masks,
-  markers, filters, embedded raster (`data:`) images, and plain `<style>`
-  rules.
-  Output is visually lossless, not byte-identical; the root `viewBox` is kept
-  so the image still scales.
-* SVGs are skipped, untouched, when they contain `<text>`, links (`<a>`),
-  `<switch>` or conditional attributes, scripting, `on*=` handlers, SMIL or
-  CSS animation, `<foreignObject>`, external references or `xml:base`,
-  embedded SVG images, `currentColor`, `var()`, CSS beyond plain presentation
-  rules (at-rules, pseudo-classes, geometry or `transform` properties, a
-  `<style>` with comments), font- or viewport-relative lengths (`em`, `vw`),
-  or a root the tool cannot carry over (percent or unit lengths, no `viewBox`
-  and no size, a non-default `preserveAspectRatio`, `overflow`).
-* SVGs nested or cross-referenced deeper than 64 levels, with a reference
-  cycle, or with entities that contain markup are skipped as well (they
-  could exhaust the stack).
-* The check is conservative, not a proof: the normalizer has no complete list
-  of what it ignores. Use `--dry-run` and review the diff for artwork that
-  matters.
-* `<title>`, `<desc>`, `role` and `aria-*` are content: such files are skipped
-  unless `--strip all`. Comments and editor metadata (Inkscape, Illustrator,
-  `<metadata>`) are removed. With `--strip none` no SVG is rewritten.
-* `class` attributes are resolved against the file's own `<style>` and then
-  removed. Do not run the tool on SVGs that a page styles from outside.
+* SVG is edited as text, never redrawn. Removed: whitespace between elements
+  and attributes, comments, `<metadata>`, editor data (Inkscape, Illustrator,
+  Sketch, Figma, Affinity, Visio) and digits that do not change a number
+  (`1.500` → `1.5`) in path data, `points` and plain numeric attributes.
+  Everything else stays as written: text, links, styles, animation,
+  references, `viewBox` and size, `<title>`, `<desc>`, `aria-*`, unknown
+  elements and attributes.
+* Every SVG result is checked before it is written: the output is parsed again
+  and must equal the source, node by node, except for those removals and for
+  numbers that are numerically equal. If it does not, the file is reported as
+  `skipped`.
+* Whitespace is only removed where SVG renders none (not inside `<text>`,
+  `<style>`, `<foreignObject>` or under `xml:space`). A comment that starts
+  with `<!--!` (licence notice) is kept. With `--strip none`, comments and
+  editor data stay. In a file with a `<style>` sheet, editor data stays and,
+  if the sheet has attribute selectors, numbers stay as written.
+* SVGs are skipped, untouched, when they contain a `<script>`, `on*=` handlers
+  or `javascript:` links (a script can read the markup), declare entities,
+  are not UTF-8, have a root that is not an SVG `<svg>`, or nest elements
+  deeper than 64 levels. A file that is not well-formed XML is reported as
+  `failed`.
+* Do not run the tool on SVGs that a page scripts, or styles by attribute
+  value or element position, from outside the file.
+* `--lossy` also rounds coordinates to 3 decimals, in the units of the file
+  (`viewBox`). Error does not add up along a path; no point moves by more than
+  0.0005 units. Paths with arcs keep all digits. Hairlines that are exactly
+  diagonal can change their antialiasing slightly.
 * AVIF is detected and skipped until an optimizer exists.
 * Lossy JPEG/PNG/WebP rebuilds drop metadata, so they only run when the
   policy is strip-all (the `--lossy` default). `--strip color`/`none` with

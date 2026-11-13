@@ -12,6 +12,7 @@ crates/core/          imageopt-core library (engine + codecs)
   src/format.rs       magic-byte detection (not extension)
   src/options.rs      OptimizeOptions, MetadataPolicy, allow_lossy_rebuild()
   tests/engine.rs     codec + I/O + batch invariants
+  tests/svg.rs        SVG minifier: removals, kept content, same geometry
 crates/cli/           imageopt binary
   src/args.rs         clap; maps flags → OptimizeOptions (lossy min-savings default 10%)
   src/run.rs          path expansion (files, dirs, globs) + progress bar
@@ -70,12 +71,14 @@ pins `stable` plus clippy/rustfmt.
 * Lossy JPEG/PNG/WebP pixel-rebuilds drop metadata → only when
   `allow_lossy_rebuild()` (lossy **and** `StripAll`).
 * Animated GIF / animated WebP: skip, never flatten.
-* SVG: rewrite only documents made of allowlisted static elements; skip
-  everything usvg would drop or freeze (text, links, script, animation,
-  foreignObject, external references, `currentColor`, `var()`, dynamic CSS).
-  The root `viewBox` and the absence of `width`/`height` must survive.
-  `<title>`/`<desc>`/`aria-*` go only with strip-all; keep-all skips every
-  SVG.
+* SVG: the codec edits the source text and never re-serializes from a
+  model. It may remove layout whitespace, comments, `<metadata>`, editor
+  namespaces, and redundant digits; nothing else. Every result must pass
+  `verify` (output parsed again and compared with the source minus exactly
+  those removals), otherwise the file is `skipped`. Skip documents with
+  scripting or entities. Text, `<title>`/`<desc>`/`aria-*`, the root size and
+  `viewBox` are never touched. Lossy rounding must not accumulate along a path
+  and leaves arcs alone.
 * AVIF: detect, skip, no optimizer yet.
 * `optimize_paths` preserves input order. `--max-in-flight-mb` is a byte
   semaphore on on-disk size; a file larger than the budget still runs alone.
@@ -86,10 +89,12 @@ pins `stable` plus clippy/rustfmt.
   guards, `C-unwind` `error_exit`. Touch only with a failing test first.
 * `crates/core/src/codecs/webp.rs` — RIFF chunk walk (animation flag / ANIM
   chunk; ICC/EXIF/XMP vs metadata policy). Pixel rebuild cannot copy ICC.
-* `crates/core/src/codecs/svg.rs` — element allowlist on the parsed document
-  (roxmltree) plus substring checks, then usvg, then `restore_root`. usvg
-  deletes what it does not model without an error, so a new element or CSS
-  feature is unsafe until a test shows the output still renders the same.
+* `crates/core/src/codecs/svg.rs` — `Rules` decides what may go, `minify`
+  edits, `verify` checks the edit against the same `Rules`. A new kind of
+  removal needs a reason why no renderer, stylesheet or reference can see it,
+  a rule, and a test in `crates/core/tests/svg.rs` (usvg is a dev-dependency
+  there, as an independent reader). The XML parser recurses, so
+  `check_raw_nesting` must run before every parse.
 * `crates/core/src/engine.rs` — candidate pick, decompression-bomb
   (`max_pixels`, including WebP header probe), `ByteSemaphore`.
 * `crates/cli/src/run.rs` — glob walk depth (`**` unbounded; `*.png` is
