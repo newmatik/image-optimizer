@@ -118,4 +118,7 @@ Tag `vX.Y.Z` must match workspace `version`. `release.yml` builds the matrix,
 checksums, then one publish job. Composite action verifies `*.sha256` before
 exec.
 
+After a release, update the `uses: newmatik/image-optimizer@vX.Y.Z` examples in
+the README to the new tag. Only full version tags exist; there is no `v1`.
+
 License: GPL-3.0-or-later (libimagequant).

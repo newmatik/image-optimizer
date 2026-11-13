@@ -164,7 +164,7 @@ Optimize and commit:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: newmatik/image-optimizer@v1
+- uses: newmatik/image-optimizer@v0.2.1
   with:
     paths: "src/assets"
     recursive: "true"
@@ -180,12 +180,15 @@ Lint gate (fail the PR if images can still shrink):
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: newmatik/image-optimizer@v1
+- uses: newmatik/image-optimizer@v0.2.1
   with:
     paths: "src/assets"
     recursive: "true"
     check: "true"
 ```
+
+Pin a release tag (see [Releases](https://github.com/newmatik/image-optimizer/releases));
+there is no moving major tag such as `v1`.
 
 Inputs: `paths` (required), `lossy`, `quality`, `min-savings`, `recursive`,
 `strip`, `check`, `dry-run`, `json`, `version`, `extra-args`.
