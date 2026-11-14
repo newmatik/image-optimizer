@@ -124,11 +124,28 @@ fn exif_chunk(input: &[u8]) -> Option<(std::ops::Range<usize>, &[u8])> {
     }
 }
 
-/// `png` with the data of its `eXIf` chunk replaced by `tiff`.
+/// `png` with the data of its first `eXIf` chunk replaced by `tiff`. Any
+/// further `eXIf` chunk is removed: it would carry the stripped EXIF data.
 fn with_exif(png: &[u8], tiff: &[u8]) -> Vec<u8> {
     let Some((range, _)) = exif_chunk(png) else {
         return png.to_vec();
     };
+    let mut rest = Vec::with_capacity(png.len() - range.end);
+    let mut at = range.end;
+    while let Some(head) = png.get(at..at + 8) {
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let Some(end) = len.checked_add(12).and_then(|n| n.checked_add(at)) else {
+            break;
+        };
+        let Some(chunk) = png.get(at..end) else {
+            break;
+        };
+        if &head[4..8] != b"eXIf" {
+            rest.extend_from_slice(chunk);
+        }
+        at = end;
+    }
+    rest.extend_from_slice(&png[at..]);
     let mut crc = 0xFFFF_FFFFu32;
     for &byte in b"eXIf".iter().chain(tiff) {
         crc ^= byte as u32;
@@ -146,7 +163,7 @@ fn with_exif(png: &[u8], tiff: &[u8]) -> Vec<u8> {
     out.extend_from_slice(b"eXIf");
     out.extend_from_slice(tiff);
     out.extend_from_slice(&(!crc).to_be_bytes());
-    out.extend_from_slice(&png[range.end..]);
+    out.extend_from_slice(&rest);
     out
 }
 

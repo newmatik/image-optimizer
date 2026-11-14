@@ -269,16 +269,14 @@ fn lossy_reencode(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error
 
 const EXIF_HEADER: &[u8] = b"Exif\0\0";
 
-/// What the EXIF data of a JPEG says about its orientation. EXIF data may
-/// continue over several `APP1` segments; they are read as one.
+/// What the EXIF data of a JPEG says about its orientation. Viewers read the
+/// first EXIF `APP1` segment alone and do not join later ones to it, so only
+/// that segment counts. If it cannot be read (for example because the data
+/// continues in a further segment), the orientation is unreadable.
 fn orientation_of(input: &[u8]) -> ExifOrientation {
-    let mut tiff: Option<Vec<u8>> = None;
-    for (marker, data) in jpeg_segments(input) {
-        if let (0xE1, Some(part)) = (marker, data.strip_prefix(EXIF_HEADER)) {
-            tiff.get_or_insert_with(Vec::new).extend_from_slice(part);
-        }
-    }
-    tiff.map_or(ExifOrientation::Upright, |tiff| exif_orientation(&tiff))
+    jpeg_segments(input)
+        .find_map(|(marker, data)| (marker == 0xE1).then(|| data.strip_prefix(EXIF_HEADER))?)
+        .map_or(ExifOrientation::Upright, exif_orientation)
 }
 
 /// An `APP1` payload that holds only the orientation of `input`, if that

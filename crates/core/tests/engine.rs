@@ -1029,7 +1029,8 @@ fn exif_orientation_survives_every_mode() {
         }
     }
 
-    // EXIF data split over two APP1 segments is read as one.
+    // EXIF data split over two APP1 segments: viewers read only the first,
+    // which holds no readable orientation, so the file is left alone.
     let whole = jpeg_with_exif(6);
     let at = whole.windows(6).position(|w| w == b"Exif\0\0").unwrap() - 4;
     let len = u16::from_be_bytes([whole[at + 2], whole[at + 3]]) as usize;
@@ -1044,8 +1045,42 @@ fn exif_orientation_survives_every_mode() {
     }
     split.extend_from_slice(&whole[at + 2 + len..]);
     let out = optimize_bytes(&split, &OptimizeOptions::default()).unwrap();
+    assert!(
+        matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(out.bytes, split);
+
+    // A second EXIF segment after a readable first one does not count.
+    let mut second = jpeg_with_exif(1);
+    let at = 4 + u16::from_be_bytes([second[4], second[5]]) as usize;
+    let first_len = u16::from_be_bytes([second[at + 2], second[at + 3]]) as usize;
+    let extra = jpeg_with_exif(6)[at..at + 2 + first_len].to_vec();
+    let after_first = at + 2 + first_len;
+    second.splice(after_first..after_first, extra);
+    let out = optimize_bytes(&second, &OptimizeOptions::default()).unwrap();
     assert_eq!(out.status, OptimizeStatus::Optimized);
-    assert_eq!(orientation_of(&out.bytes), Some(6));
+    assert_eq!(orientation_of(&out.bytes), None);
+
+    // A PNG with a second eXIf chunk keeps only the orientation.
+    let doubled = png_with_chunk(png_with_exif(6), b"eXIf", &exif_tiff(6));
+    for metadata in [MetadataPolicy::KeepColorProfile, MetadataPolicy::StripAll] {
+        let opts = OptimizeOptions {
+            metadata,
+            min_savings_percent: 0.0,
+            ..Default::default()
+        };
+        let out = optimize_bytes(&doubled, &opts).unwrap();
+        assert!(
+            !matches!(out.status, OptimizeStatus::Failed { .. }),
+            "{:?}",
+            out.status
+        );
+        assert_eq!(png_chunk_count(&out.bytes, b"eXIf"), 1, "{metadata:?}");
+        assert!(!out.bytes.windows(4).any(|w| w == b"Cam\0"), "{metadata:?}");
+        assert_eq!(orientation_of(&out.bytes), Some(6), "{metadata:?}");
+    }
 
     // EXIF data that cannot be read is not stripped: the file stays as it is.
     let mut broken = jpeg_with_exif(6);
