@@ -18,7 +18,9 @@ use std::ptr;
 
 use super::{CandidateSet, Optimizer};
 use crate::error::Error;
-use crate::metadata::{keep_all, keep_color_profile};
+use crate::metadata::{
+    exif_orientation, keep_all, keep_color_profile, orientation_only_tiff, ExifOrientation,
+};
 use crate::options::OptimizeOptions;
 
 pub struct JpegOptimizer;
@@ -26,6 +28,15 @@ pub struct JpegOptimizer;
 impl Optimizer for JpegOptimizer {
     fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
         let mut out = Vec::new();
+
+        // Viewers turn the picture by its EXIF orientation. If that cannot
+        // be read, the EXIF block must not be stripped: leave the file alone.
+        if !keep_all(opts.metadata) && orientation_of(input) == ExifOrientation::Unreadable {
+            return Ok(CandidateSet::Skipped {
+                reason: "JPEG has EXIF data that could not be read; left untouched to keep its orientation"
+                    .to_string(),
+            });
+        }
 
         // A lossy re-encode discards ICC/EXIF/COM markers, so it may only be
         // offered when the policy is to strip everything (otherwise a smaller
@@ -63,8 +74,15 @@ impl Optimizer for JpegOptimizer {
 fn lossless_transform(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error> {
     let keep_icc = keep_color_profile(opts.metadata);
     let keep_everything = keep_all(opts.metadata);
+    // Keep-all copies the whole EXIF block; otherwise only the orientation
+    // survives, because viewers turn the picture by it.
+    let orientation = if keep_everything {
+        None
+    } else {
+        orientation_marker(input)
+    };
     flatten(catch_unwind(AssertUnwindSafe(|| unsafe {
-        jpegtran(input, keep_icc, keep_everything)
+        jpegtran(input, keep_icc, keep_everything, orientation.as_deref())
     })))
 }
 
@@ -112,7 +130,12 @@ const TRUE: c_int = 1;
 
 // Explicit `&mut *boxed` derefs make the FFI ownership obvious; keep them.
 #[allow(clippy::explicit_auto_deref)]
-unsafe fn jpegtran(input: &[u8], keep_icc: bool, keep_all_markers: bool) -> Result<Vec<u8>, Error> {
+unsafe fn jpegtran(
+    input: &[u8],
+    keep_icc: bool,
+    keep_all_markers: bool,
+    orientation: Option<&[u8]>,
+) -> Result<Vec<u8>, Error> {
     use mozjpeg_sys::*;
 
     // Shared error manager. Must outlive both structs (declared first → dropped
@@ -168,6 +191,16 @@ unsafe fn jpegtran(input: &[u8], keep_icc: bool, keep_all_markers: bool) -> Resu
 
     jpeg_write_coefficients(&mut *cinfo, coefs);
 
+    // EXIF goes first, right after the JFIF header libjpeg writes.
+    if let Some(exif) = orientation {
+        jpeg_write_marker(
+            &mut *cinfo,
+            JPEG_APP0 + 1,
+            exif.as_ptr(),
+            exif.len() as c_uint,
+        );
+    }
+
     // Copy preserved markers verbatim into the output.
     if keep_all_markers || keep_icc {
         let mut marker = dinfo.marker_list;
@@ -198,6 +231,7 @@ unsafe fn jpegtran(input: &[u8], keep_icc: bool, keep_all_markers: bool) -> Resu
 
 fn lossy_reencode(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error> {
     let quality = opts.quality_or(80) as f32;
+    let orientation = orientation_marker(input);
     flatten(catch_unwind(AssertUnwindSafe(
         || -> Result<Vec<u8>, Error> {
             use mozjpeg::{ColorSpace, Compress, Decompress};
@@ -220,6 +254,9 @@ fn lossy_reencode(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error
             let mut writer = comp
                 .start_compress(Vec::new())
                 .map_err(|e| Error::Encode(e.to_string()))?;
+            if let Some(exif) = &orientation {
+                writer.write_marker(mozjpeg::Marker::APP(1), exif);
+            }
             writer
                 .write_scanlines(&pixels)
                 .map_err(|e| Error::Encode(e.to_string()))?;
@@ -229,6 +266,62 @@ fn lossy_reencode(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error
 }
 
 // --- helpers ---------------------------------------------------------------
+
+const EXIF_HEADER: &[u8] = b"Exif\0\0";
+
+/// What the EXIF data of a JPEG says about its orientation. Viewers read the
+/// first EXIF `APP1` segment alone and do not join later ones to it, so only
+/// that segment counts. If it cannot be read (for example because the data
+/// continues in a further segment), the orientation is unreadable.
+fn orientation_of(input: &[u8]) -> ExifOrientation {
+    jpeg_segments(input)
+        .find_map(|(marker, data)| (marker == 0xE1).then(|| data.strip_prefix(EXIF_HEADER))?)
+        .map_or(ExifOrientation::Upright, exif_orientation)
+}
+
+/// An `APP1` payload that holds only the orientation of `input`, if that
+/// orientation turns or mirrors the picture.
+fn orientation_marker(input: &[u8]) -> Option<Vec<u8>> {
+    let ExifOrientation::Turned(orientation) = orientation_of(input) else {
+        return None;
+    };
+    let mut payload = EXIF_HEADER.to_vec();
+    payload.extend_from_slice(&orientation_only_tiff(orientation));
+    Some(payload)
+}
+
+/// The marker segments of a JPEG up to the first scan, as (marker, payload).
+/// Bytes between segments are skipped up to the next `0xFF` the way libjpeg's
+/// `next_marker` does: they are no segment, but a real segment after them
+/// is read by the decoder and must be read here too.
+fn jpeg_segments(input: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
+    let mut i = if input.starts_with(&[0xFF, 0xD8]) {
+        2
+    } else {
+        input.len()
+    };
+    std::iter::from_fn(move || loop {
+        while *input.get(i)? != 0xFF {
+            i += 1;
+        }
+        while input.get(i) == Some(&0xFF) {
+            i += 1;
+        }
+        let marker = *input.get(i)?;
+        i += 1;
+        match marker {
+            // Start of scan, end of image: no more headers.
+            0xDA | 0xD9 => return None,
+            // `FF 00` is no marker; markers without a length.
+            0x00 | 0x01 | 0xD0..=0xD7 => continue,
+            _ => {}
+        }
+        let len = u16::from_be_bytes([*input.get(i)?, *input.get(i + 1)?]) as usize;
+        let segment = input.get(i + 2..i.checked_add(len)?)?;
+        i += len;
+        return Some((marker, segment));
+    })
+}
 
 fn should_offer_lossy(input: &[u8], opts: &OptimizeOptions) -> bool {
     let target = opts.quality_or(80);

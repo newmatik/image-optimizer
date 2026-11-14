@@ -181,6 +181,10 @@ Notes:
   0.0005 units. Paths with arcs or smooth curves (`S`, `T`) and the root
   element (size, `viewBox`) keep all digits. Hairlines that are exactly
   diagonal can change their antialiasing slightly.
+* An EXIF orientation that turns or mirrors a JPEG or PNG is kept in every
+  mode (as a minimal EXIF block when metadata is stripped): viewers apply it,
+  so dropping it would show the picture rotated. A file whose EXIF data
+  cannot be read is skipped unless `--strip none`.
 * AVIF is detected and skipped until an optimizer exists.
 * Lossy JPEG/PNG/WebP rebuilds drop metadata, so they only run when the
   policy is strip-all (the `--lossy` default). `--strip color`/`none` with

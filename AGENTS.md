@@ -80,9 +80,13 @@ pins `stable` plus clippy/rustfmt.
   scripting or entities. Text, `<title>`/`<desc>`/`aria-*`, the root size and
   `viewBox` are never removed or rounded. Lossy rounding must not accumulate
   along a path and leaves arcs, smooth curves and the root element alone.
+* JPEG/PNG: an EXIF orientation of 2 to 8 survives every mode; a PNG with
+  one gets no pixel rebuild.
 * AVIF: detect, skip, no optimizer yet.
 * `optimize_paths` preserves input order. `--max-in-flight-mb` is a byte
   semaphore on on-disk size; a file larger than the budget still runs alone.
+  Never wait for the budget (or anything else) on a rayon worker: codecs run
+  nested jobs on the same pool and a blocked worker can strand one.
 
 ## Where the tricky code is
 
