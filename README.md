@@ -175,6 +175,10 @@ Notes:
   `<metadata>`) are removed. With `--strip none` no SVG is rewritten.
 * `class` attributes are resolved against the file's own `<style>` and then
   removed. Do not run the tool on SVGs that a page styles from outside.
+* An EXIF orientation that turns or mirrors a JPEG or PNG is kept in every
+  mode (as a minimal EXIF block when metadata is stripped): viewers apply it,
+  so dropping it would show the picture rotated. A file whose EXIF data
+  cannot be read is skipped unless `--strip none`.
 * AVIF is detected and skipped until an optimizer exists.
 * Lossy JPEG/PNG/WebP rebuilds drop metadata, so they only run when the
   policy is strip-all (the `--lossy` default). `--strip color`/`none` with

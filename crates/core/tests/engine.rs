@@ -935,6 +935,265 @@ fn gif_with_a_comment_is_left_alone_under_keep_all() {
     assert!(!matches!(default.status, OptimizeStatus::Skipped { .. }));
 }
 
+/// EXIF data (TIFF) with a camera make and the given orientation.
+fn exif_tiff(orientation: u8) -> Vec<u8> {
+    let mut tiff = b"MM\0*\0\0\0\x08\0\x02".to_vec();
+    tiff.extend_from_slice(&[0x01, 0x0F, 0, 2, 0, 0, 0, 4, b'C', b'a', b'm', 0]);
+    tiff.extend_from_slice(&[0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, orientation, 0, 0]);
+    tiff.extend_from_slice(&[0, 0, 0, 0]);
+    tiff
+}
+
+fn jpeg_with_exif(orientation: u8) -> Vec<u8> {
+    let mut jpeg = make_jpeg();
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&exif_tiff(orientation));
+    let mut segment = vec![0xFF, 0xE1];
+    segment.extend_from_slice(&(payload.len() as u16 + 2).to_be_bytes());
+    segment.extend_from_slice(&payload);
+    // After SOI and the JFIF APP0 segment.
+    assert_eq!(&jpeg[2..4], &[0xFF, 0xE0]);
+    let at = 4 + u16::from_be_bytes([jpeg[4], jpeg[5]]) as usize;
+    jpeg.splice(at..at, segment);
+    jpeg
+}
+
+fn png_with_exif(orientation: u8) -> Vec<u8> {
+    png_with_chunk(make_png(), b"eXIf", &exif_tiff(orientation))
+}
+
+/// `png` with a chunk inserted right after IHDR.
+fn png_with_chunk(mut png: Vec<u8>, kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in kind.iter().chain(data) {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                0xEDB8_8320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
+    chunk.extend_from_slice(&(!crc).to_be_bytes());
+    // After the signature (8) and IHDR (25).
+    png.splice(33..33, chunk);
+    png
+}
+
+/// The orientation a viewer would apply to the optimized file.
+fn orientation_of(bytes: &[u8]) -> Option<u8> {
+    let find = |needle: &[u8]| bytes.windows(needle.len()).position(|w| w == needle);
+    let tiff = if bytes.starts_with(&[0xFF, 0xD8]) {
+        &bytes[find(b"Exif\0\0")? + 6..]
+    } else {
+        &bytes[find(b"eXIf")? + 4..]
+    };
+    imageopt_core::metadata::display_orientation(tiff)
+}
+
+/// Browsers turn JPEG and PNG pictures by their EXIF orientation. Stripping it
+/// with the other metadata would show the picture rotated.
+#[test]
+fn exif_orientation_survives_every_mode() {
+    let modes = [
+        (false, MetadataPolicy::KeepColorProfile),
+        (false, MetadataPolicy::StripAll),
+        (false, MetadataPolicy::KeepAll),
+        (true, MetadataPolicy::StripAll),
+    ];
+    for (name, input) in [("jpeg", jpeg_with_exif(6)), ("png", png_with_exif(6))] {
+        assert_eq!(orientation_of(&input), Some(6), "{name} fixture");
+        assert!(image::load_from_memory(&input).is_ok(), "{name} fixture");
+        for (lossy, metadata) in modes {
+            let opts = OptimizeOptions {
+                lossy,
+                metadata,
+                min_savings_percent: 0.0,
+                ..Default::default()
+            };
+            let out = optimize_bytes(&input, &opts).unwrap();
+            let case = format!("{name} lossy={lossy} {metadata:?}: {:?}", out.status);
+            assert!(
+                !matches!(out.status, OptimizeStatus::Failed { .. }),
+                "{case}"
+            );
+            assert_eq!(orientation_of(&out.bytes), Some(6), "{case}");
+            assert!(image::load_from_memory(&out.bytes).is_ok(), "{case}");
+            // Only keep-all keeps the rest of the EXIF data.
+            let has_make = out.bytes.windows(4).any(|w| w == b"Cam\0");
+            assert_eq!(has_make, metadata == MetadataPolicy::KeepAll, "{case}");
+        }
+    }
+
+    // EXIF data split over two APP1 segments: viewers read only the first,
+    // which holds no readable orientation, so the file is left alone.
+    let whole = jpeg_with_exif(6);
+    let at = whole.windows(6).position(|w| w == b"Exif\0\0").unwrap() - 4;
+    let len = u16::from_be_bytes([whole[at + 2], whole[at + 3]]) as usize;
+    let tiff = &whole[at + 10..at + 2 + len];
+    let (first, second) = tiff.split_at(9);
+    let mut split = whole[..at].to_vec();
+    for part in [first, second] {
+        split.extend_from_slice(&[0xFF, 0xE1]);
+        split.extend_from_slice(&(part.len() as u16 + 8).to_be_bytes());
+        split.extend_from_slice(b"Exif\0\0");
+        split.extend_from_slice(part);
+    }
+    split.extend_from_slice(&whole[at + 2 + len..]);
+    let out = optimize_bytes(&split, &OptimizeOptions::default()).unwrap();
+    assert!(
+        matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(out.bytes, split);
+
+    // A second EXIF segment after a readable first one does not count.
+    let mut second = jpeg_with_exif(1);
+    let at = 4 + u16::from_be_bytes([second[4], second[5]]) as usize;
+    let first_len = u16::from_be_bytes([second[at + 2], second[at + 3]]) as usize;
+    let extra = jpeg_with_exif(6)[at..at + 2 + first_len].to_vec();
+    let after_first = at + 2 + first_len;
+    second.splice(after_first..after_first, extra);
+    let out = optimize_bytes(&second, &OptimizeOptions::default()).unwrap();
+    assert_eq!(out.status, OptimizeStatus::Optimized);
+    assert_eq!(orientation_of(&out.bytes), None);
+
+    // A PNG with a second eXIf chunk keeps only the orientation.
+    let doubled = png_with_chunk(png_with_exif(6), b"eXIf", &exif_tiff(6));
+    for metadata in [MetadataPolicy::KeepColorProfile, MetadataPolicy::StripAll] {
+        let opts = OptimizeOptions {
+            metadata,
+            min_savings_percent: 0.0,
+            ..Default::default()
+        };
+        let out = optimize_bytes(&doubled, &opts).unwrap();
+        assert!(
+            !matches!(out.status, OptimizeStatus::Failed { .. }),
+            "{:?}",
+            out.status
+        );
+        assert_eq!(png_chunk_count(&out.bytes, b"eXIf"), 1, "{metadata:?}");
+        assert!(!out.bytes.windows(4).any(|w| w == b"Cam\0"), "{metadata:?}");
+        assert_eq!(orientation_of(&out.bytes), Some(6), "{metadata:?}");
+    }
+
+    // EXIF data that cannot be read is not stripped: the file stays as it is.
+    let mut broken = jpeg_with_exif(6);
+    let tiff_at = broken.windows(6).position(|w| w == b"Exif\0\0").unwrap() + 6;
+    broken[tiff_at + 7] = 0xF0; // first IFD far outside the data
+    let out = optimize_bytes(&broken, &OptimizeOptions::default()).unwrap();
+    assert!(
+        matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(out.bytes, broken);
+    let keep = OptimizeOptions {
+        metadata: MetadataPolicy::KeepAll,
+        ..Default::default()
+    };
+    assert_eq!(
+        optimize_bytes(&broken, &keep).unwrap().status,
+        OptimizeStatus::Optimized
+    );
+
+    // Bytes that look like an EXIF segment but have no marker prefix are not
+    // one (decoders skip them): no orientation may be invented.
+    let mut stray = make_jpeg();
+    let at = 4 + u16::from_be_bytes([stray[4], stray[5]]) as usize;
+    let mut fake = vec![0xE1, 0x00, 0x22];
+    fake.extend_from_slice(b"Exif\0\0");
+    fake.extend_from_slice(&imageopt_core::metadata::orientation_only_tiff(6));
+    stray.splice(at..at, fake);
+    if let Ok(out) = optimize_bytes(&stray, &OptimizeOptions::default()) {
+        if out.status == OptimizeStatus::Optimized {
+            assert!(!out.bytes.windows(4).any(|w| w == b"Exif"));
+        }
+    }
+
+    // Stray bytes before a real EXIF segment: the decoder skips them and
+    // reads the segment, so its orientation is kept as well.
+    let mut stray_then_exif = jpeg_with_exif(6);
+    let at = 4 + u16::from_be_bytes([stray_then_exif[4], stray_then_exif[5]]) as usize;
+    stray_then_exif.splice(at..at, [0x12, 0x34, 0x00]);
+    assert!(image::load_from_memory(&stray_then_exif).is_ok());
+    let out = optimize_bytes(&stray_then_exif, &OptimizeOptions::default()).unwrap();
+    assert!(
+        !matches!(out.status, OptimizeStatus::Failed { .. }),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(orientation_of(&out.bytes), Some(6), "{:?}", out.status);
+
+    // An upright picture needs no EXIF: it is stripped as before.
+    for (name, input) in [("jpeg", jpeg_with_exif(1)), ("png", png_with_exif(1))] {
+        let out = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
+        assert_eq!(out.status, OptimizeStatus::Optimized, "{name}");
+        assert!(!out.bytes.windows(4).any(|w| w == b"Cam\0"), "{name}");
+        assert!(
+            !out.bytes.windows(4).any(|w| w == b"Exif" || w == b"eXIf"),
+            "{name}"
+        );
+    }
+}
+
+/// The chunk types of a PNG, in file order.
+fn png_chunk_kinds(png: &[u8]) -> Vec<[u8; 4]> {
+    let mut kinds = Vec::new();
+    let mut at = 8;
+    while let Some(head) = png.get(at..at + 8) {
+        let len = u32::from_be_bytes(head[..4].try_into().unwrap()) as usize;
+        kinds.push(head[4..8].try_into().unwrap());
+        at += len + 12;
+    }
+    kinds
+}
+
+/// Keeping the orientation of a PNG must not cost it any chunk that
+/// `--strip color` keeps otherwise (the list it uses mirrors oxipng's).
+#[test]
+fn exif_orientation_keeps_the_safe_chunks() {
+    let mut plain = make_png();
+    for (kind, data) in [
+        (b"gAMA", &[0, 0, 0xB1, 0x8F][..]),
+        (
+            b"cHRM",
+            &[
+                0, 0, 0x7A, 0x26, 0, 0, 0x80, 0x84, 0, 0, 0xFA, 0, 0, 0, 0x80, 0xE8, 0, 0, 0x75,
+                0x30, 0, 0, 0xEA, 0x60, 0, 0, 0x3A, 0x98, 0, 0, 0x17, 0x70,
+            ][..],
+        ),
+        (b"sRGB", &[0][..]),
+        (b"pHYs", &[0, 0, 0x0B, 0x13, 0, 0, 0x0B, 0x13, 1][..]),
+        (b"tEXt", &b"Comment\0hello"[..]),
+    ] {
+        plain = png_with_chunk(plain, kind, data);
+    }
+    let rotated = png_with_chunk(plain.clone(), b"eXIf", &exif_tiff(6));
+    let opts = OptimizeOptions {
+        metadata: MetadataPolicy::KeepColorProfile,
+        min_savings_percent: 0.0,
+        ..Default::default()
+    };
+    let kinds = |input: &[u8]| {
+        let out = optimize_bytes(input, &opts).unwrap();
+        assert_eq!(out.status, OptimizeStatus::Optimized);
+        let mut kinds = png_chunk_kinds(&out.bytes);
+        kinds.retain(|k| k != b"eXIf");
+        kinds.sort();
+        kinds
+    };
+    let plain_kinds = kinds(&plain);
+    assert!(plain_kinds.contains(b"sRGB"), "{plain_kinds:?}");
+    assert!(!plain_kinds.contains(b"tEXt"), "{plain_kinds:?}");
+    assert_eq!(kinds(&rotated), plain_kinds);
+}
+
 #[test]
 fn corrupt_jpeg_fails_without_panicking() {
     // Valid JPEG magic bytes followed by garbage.

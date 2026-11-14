@@ -13,6 +13,7 @@ use oxipng::{Options, StripChunks};
 
 use super::{CandidateSet, Optimizer};
 use crate::error::Error;
+use crate::metadata::{exif_orientation, keep_all, orientation_only_tiff, ExifOrientation};
 use crate::options::{MetadataPolicy, OptimizeOptions};
 
 pub struct PngOptimizer;
@@ -30,15 +31,52 @@ impl Optimizer for PngOptimizer {
         if animated && matches!(options.strip, StripChunks::All) {
             options.strip = StripChunks::Keep(oxipng::indexset! {*b"acTL", *b"fcTL", *b"fdAT"});
         }
-        let lossless = oxipng::optimize_from_memory(input, &options)
+        // Browsers rotate a PNG by its EXIF orientation. Keep the `eXIf`
+        // chunk of a rotated image when metadata is stripped; without the
+        // tag the picture would be shown turned.
+        let orientation = match exif_chunk(input).map(|(_, data)| exif_orientation(data)) {
+            Some(ExifOrientation::Turned(value)) => Some(value),
+            // Not readable: stripping could drop an orientation.
+            Some(ExifOrientation::Unreadable) if !keep_all(opts.metadata) => {
+                return Ok(CandidateSet::Skipped {
+                    reason: "PNG has EXIF data that could not be read; left untouched to keep its orientation"
+                        .to_string(),
+                });
+            }
+            _ => None,
+        };
+        let rotated = orientation.is_some();
+        if rotated {
+            options.strip = match options.strip {
+                StripChunks::All => StripChunks::Keep(oxipng::indexset! {*b"eXIf"}),
+                StripChunks::Keep(mut kept) => {
+                    kept.insert(*b"eXIf");
+                    StripChunks::Keep(kept)
+                }
+                // The chunks "safe" keeps, plus `eXIf`.
+                StripChunks::Safe => {
+                    let mut kept: oxipng::IndexSet<[u8; 4]> = SAFE_CHUNKS.into_iter().collect();
+                    kept.insert(*b"eXIf");
+                    StripChunks::Keep(kept)
+                }
+                other => other,
+            };
+        }
+        let mut lossless = oxipng::optimize_from_memory(input, &options)
             .map_err(|e| Error::Encode(format!("oxipng: {e}")))?;
+        // Unless everything is kept, the orientation is all that stays of the
+        // EXIF data.
+        if let (Some(orientation), false) = (orientation, keep_all(opts.metadata)) {
+            lossless = with_exif(&lossless, &orientation_only_tiff(orientation));
+        }
         out.push(lossless);
 
         // Lossy quantization rebuilds the PNG from RGBA pixels, discarding any
         // source metadata, so only offer it when the policy is to strip all.
         // It also decodes a single image: an animated PNG would come out as
         // its first frame only, so animation keeps the lossless pass alone.
-        if opts.allow_lossy_rebuild() && !animated {
+        // Nor can it carry the orientation over.
+        if opts.allow_lossy_rebuild() && !animated && !rotated {
             if let Ok(q) = quantize(input, opts) {
                 out.push(q);
             }
@@ -68,13 +106,81 @@ pub(crate) fn is_animated_png(input: &[u8]) -> bool {
     false
 }
 
+/// The first `eXIf` chunk of a PNG: its byte range (length field to CRC) and
+/// its data.
+fn exif_chunk(input: &[u8]) -> Option<(std::ops::Range<usize>, &[u8])> {
+    let mut at = 8usize;
+    loop {
+        let len = u32::from_be_bytes(input.get(at..at.checked_add(4)?)?.try_into().ok()?) as usize;
+        let kind = input.get(at + 4..at + 8)?;
+        let end = at.checked_add(len)?.checked_add(12)?;
+        let data = input.get(at + 8..end - 4)?;
+        match kind {
+            b"eXIf" => return Some((at..end, data)),
+            b"IEND" => return None,
+            _ => {}
+        }
+        at = end;
+    }
+}
+
+/// `png` with the data of its first `eXIf` chunk replaced by `tiff`. Any
+/// further `eXIf` chunk is removed: it would carry the stripped EXIF data.
+fn with_exif(png: &[u8], tiff: &[u8]) -> Vec<u8> {
+    let Some((range, _)) = exif_chunk(png) else {
+        return png.to_vec();
+    };
+    let mut rest = Vec::with_capacity(png.len() - range.end);
+    let mut at = range.end;
+    while let Some(head) = png.get(at..at + 8) {
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let Some(end) = len.checked_add(12).and_then(|n| n.checked_add(at)) else {
+            break;
+        };
+        let Some(chunk) = png.get(at..end) else {
+            break;
+        };
+        if &head[4..8] != b"eXIf" {
+            rest.extend_from_slice(chunk);
+        }
+        at = end;
+    }
+    rest.extend_from_slice(&png[at..]);
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in b"eXIf".iter().chain(tiff) {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                0xEDB8_8320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    let mut out = Vec::with_capacity(png.len());
+    out.extend_from_slice(&png[..range.start]);
+    out.extend_from_slice(&(tiff.len() as u32).to_be_bytes());
+    out.extend_from_slice(b"eXIf");
+    out.extend_from_slice(tiff);
+    out.extend_from_slice(&(!crc).to_be_bytes());
+    out.extend_from_slice(&rest);
+    out
+}
+
+/// The chunks oxipng's `StripChunks::Safe` keeps (its `DISPLAY_CHUNKS`, which
+/// it does not export). A rotated PNG is stripped with this list plus `eXIf`;
+/// `exif_orientation_keeps_the_safe_chunks` checks that it still matches.
+const SAFE_CHUNKS: [[u8; 4]; 7] = [
+    *b"cICP", *b"iCCP", *b"sRGB", *b"pHYs", *b"acTL", *b"fcTL", *b"fdAT",
+];
+
 fn oxipng_options(opts: &OptimizeOptions) -> Options {
     let level = opts.png_level.min(6);
     let mut o = Options::from_preset(level);
     o.strip = match opts.metadata {
         MetadataPolicy::StripAll => StripChunks::All,
-        // `Safe` removes metadata chunks that don't affect rendering while
-        // keeping color-affecting ones (iCCP/sRGB/gAMA/cHRM).
+        // `Safe` keeps the chunks in `SAFE_CHUNKS` (color space, pixel
+        // size, animation) and removes the rest.
         MetadataPolicy::KeepColorProfile => StripChunks::Safe,
         MetadataPolicy::KeepAll => StripChunks::None,
     };
