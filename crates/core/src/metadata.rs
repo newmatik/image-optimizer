@@ -75,6 +75,8 @@ fn read_orientation(tiff: &[u8]) -> Option<ExifOrientation> {
     for index in 0..entries {
         let entry = ifd.checked_add(2 + index * 12)?;
         if u16_at(entry)? == ORIENTATION {
+            // The whole 12-byte entry must be there; readers reject a cut one.
+            tiff.get(entry..entry.checked_add(12)?)?;
             if u16_at(entry + 2)? != SHORT || u32_at(entry + 4)? != 1 {
                 return None;
             }
@@ -138,7 +140,7 @@ mod tests {
         assert_eq!(display_orientation(&tiff), Some(6));
 
         // Data that ends before the tag is unreadable, never "upright".
-        for cut in 0..32 {
+        for cut in 0..34 {
             assert_eq!(
                 exif_orientation(&tiff[..cut]),
                 ExifOrientation::Unreadable,
@@ -148,6 +150,11 @@ mod tests {
         assert_eq!(
             exif_orientation(&orientation_only_tiff(1)),
             ExifOrientation::Upright
+        );
+        // An entry cut after its value is not read either.
+        assert_eq!(
+            exif_orientation(&orientation_only_tiff(6)[..20]),
+            ExifOrientation::Unreadable
         );
         assert_eq!(display_orientation(b"II*\0\xff\xff\xff\xff"), None);
         assert_eq!(display_orientation(b"XX*\0\x08\0\0\0"), None);
