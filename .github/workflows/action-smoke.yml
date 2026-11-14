@@ -11,8 +11,20 @@ concurrency:
 
 jobs:
   smoke:
-    name: Composite action
-    runs-on: ubuntu-latest
+    # "Composite action" is a required status check: the Linux job keeps
+    # exactly that name.
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Composite action
+          - os: macos-latest
+            name: Composite action (macos-latest)
+          - os: windows-latest
+            name: Composite action (windows-latest)
     steps:
       - uses: actions/checkout@v7
         with:
@@ -70,3 +82,64 @@ jobs:
           lossy: "true"
           min-savings: "10"
           dry-run: "true"
+
+  # What users get: the action and the binary of the released tag, not the
+  # wrapper of this branch. Bump the tag after every release.
+  released:
+    name: Released action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Create a compressible PNG
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-assets
+          python3 - <<'PY'
+          import struct, zlib
+
+          def chunk(kind, data):
+              body = kind + data
+              return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+          width = height = 64
+          rows = b"".join(b"\x00" + bytes([200, 30, 30]) * width for _ in range(height))
+          png = (
+              b"\x89PNG\r\n\x1a\n"
+              + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+              + chunk(b"IDAT", zlib.compress(rows, 0))
+              + chunk(b"IEND", b"")
+          )
+          open("smoke-assets/released.png", "wb").write(png)
+          PY
+          wc -c < smoke-assets/released.png > smoke-assets/before.txt
+
+      - name: Optimize with the released action
+        uses: newmatik/image-optimizer@v0.2.1
+        with:
+          paths: smoke-assets/released.png
+
+      - name: Assert the file shrank and is still a PNG
+        shell: bash
+        run: |
+          set -euo pipefail
+          before=$(cat smoke-assets/before.txt)
+          after=$(wc -c < smoke-assets/released.png)
+          echo "released.png: $before -> $after bytes"
+          [ "$after" -lt "$before" ]
+          [ "$(head -c 8 smoke-assets/released.png | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ]
+
+      # The v0.2.1 wrapper downloads into a fixed folder and fails on a second
+      # use in the same job (fixed on main: one temp folder per use).
+      - name: Clear the v0.2.1 download folder
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/imageopt"
+
+      - name: A second run finds nothing left to do
+        uses: newmatik/image-optimizer@v0.2.1
+        with:
+          paths: smoke-assets/released.png
+          check: "true"

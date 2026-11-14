@@ -70,7 +70,8 @@ pins `stable` plus clippy/rustfmt.
   10 so CI commit-back loops converge.
 * Lossy JPEG/PNG/WebP pixel-rebuilds drop metadata → only when
   `allow_lossy_rebuild()` (lossy **and** `StripAll`).
-* Animated GIF / animated WebP: skip, never flatten.
+* Animated GIF / animated WebP: skip, never flatten. Animated PNG: lossless
+  pass only, no pixel rebuild.
 * SVG: the codec edits the source text and never re-serializes from a
   model. It may remove layout whitespace, comments, `<metadata>`, editor
   namespaces, and redundant digits; nothing else. Every result must pass
@@ -101,8 +102,9 @@ pins `stable` plus clippy/rustfmt.
   depth 1). Directory walks only include known image extensions.
 * `action.yml` — inputs via env (no shell interpolation). Downloads a
   **released** binary, not the PR compile. `action-smoke.yml` therefore tests
-  the wrapper + latest/pinned release, not unreleased CLI changes. CLI
-  changes are covered by `cargo test` in `ci.yml`.
+  the wrapper + latest/pinned release (job `smoke`, all three systems) and the
+  action exactly as published at the last tag (job `released`), not unreleased
+  CLI changes. CLI changes are covered by `cargo test` in `ci.yml`.
 
 ## What not to do
 
@@ -132,7 +134,8 @@ checksums, then one publish job. Composite action verifies `*.sha256` before
 exec.
 
 After a release, update the `uses: newmatik/image-optimizer@vX.Y.Z` examples in
-the README to the new tag and drop the note about what the previous tag's
-wrapper lacks. Only full version tags exist; there is no `v1`.
+the README and the `released` job in `action-smoke.yml` to the new tag (add
+`windows-latest` to that job from v0.3.0 on), and drop the note about what the
+previous tag's wrapper lacks. Only full version tags exist; there is no `v1`.
 
 License: GPL-3.0-or-later (libimagequant).
