@@ -1178,6 +1178,114 @@ fn in_flight_byte_budget_still_processes_all_files_in_order() {
     }
 }
 
+/// The budget used to be awaited on pool workers. A worker that had picked up
+/// the next file while a PNG candidate evaluation was suspended below it then
+/// blocked for good, and every caller sharing the pool with it. It takes
+/// concurrent callers to hit the timing, as in a test binary or a service;
+/// with the old code this stalls within a few rounds. A stall fails the test
+/// instead of hanging the suite.
+#[test]
+fn in_flight_byte_budget_never_stalls_the_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = make_png();
+    let paths: Vec<_> = (0..16)
+        .map(|i| {
+            let p = dir.path().join(format!("img{i}.png"));
+            std::fs::write(&p, &png).unwrap();
+            p
+        })
+        .collect();
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let workers = 6;
+    for worker in 0..workers {
+        let (paths, png, done) = (paths.clone(), png.clone(), done.clone());
+        std::thread::spawn(move || {
+            for _ in 0..12 {
+                if worker < 3 {
+                    // Budgeted batches, one file at a time.
+                    let opts = OptimizeOptions {
+                        max_in_flight_bytes: Some(1),
+                        ..Default::default()
+                    };
+                    let results = optimize_paths(&paths, &opts, &OutputSink::DryRun, |_| {});
+                    assert_eq!(results.len(), paths.len());
+                    for (r, p) in results.iter().zip(&paths) {
+                        assert_eq!(r.source.as_ref(), Some(p), "order must be preserved");
+                        assert_eq!(r.status, OptimizeStatus::Optimized);
+                    }
+                } else {
+                    // Other users of the same pool.
+                    for _ in 0..8 {
+                        optimize_bytes(&png, &OptimizeOptions::default()).unwrap();
+                    }
+                }
+            }
+            // The receiver is gone if the test already failed.
+            let _ = done.send(());
+        });
+    }
+    drop(done);
+    for _ in 0..workers {
+        if finished
+            .recv_timeout(std::time::Duration::from_secs(180))
+            .is_err()
+        {
+            stalled("a budgeted PNG batch");
+        }
+    }
+}
+
+/// A caller that is itself a pool worker (a service that runs batches on the
+/// pool, or a caller-installed pool) must not stall either: with one worker
+/// there is nobody else to run the files.
+#[test]
+fn in_flight_byte_budget_works_when_called_from_a_pool_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = make_png();
+    let paths: Vec<_> = (0..6)
+        .map(|i| {
+            let p = dir.path().join(format!("img{i}.png"));
+            std::fs::write(&p, &png).unwrap();
+            p
+        })
+        .collect();
+
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for threads in [1, 2] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let opts = OptimizeOptions {
+                max_in_flight_bytes: Some(1),
+                ..Default::default()
+            };
+            let results =
+                pool.install(|| optimize_paths(&paths, &opts, &OutputSink::DryRun, |_| {}));
+            for (r, p) in results.iter().zip(&paths) {
+                assert_eq!(r.source.as_ref(), Some(p), "order must be preserved");
+                assert_eq!(r.status, OptimizeStatus::Optimized);
+            }
+        }
+        let _ = done.send(());
+    });
+    if finished
+        .recv_timeout(std::time::Duration::from_secs(180))
+        .is_err()
+    {
+        stalled("a budgeted batch started on a pool worker");
+    }
+}
+
+/// A stalled pool takes every other test in this binary with it, and a panic
+/// here would not free it: report and end the process.
+fn stalled(what: &str) -> ! {
+    eprintln!("FAILED: {what} stalled or panicked; ending the test process");
+    std::process::exit(1);
+}
+
 #[test]
 fn rejects_images_over_pixel_limit() {
     let input = make_png(); // 128x128 = 16384 px
