@@ -935,6 +935,109 @@ fn gif_with_a_comment_is_left_alone_under_keep_all() {
     assert!(!matches!(default.status, OptimizeStatus::Skipped { .. }));
 }
 
+/// EXIF data (TIFF) with a camera make and the given orientation.
+fn exif_tiff(orientation: u8) -> Vec<u8> {
+    let mut tiff = b"MM\0*\0\0\0\x08\0\x02".to_vec();
+    tiff.extend_from_slice(&[0x01, 0x0F, 0, 2, 0, 0, 0, 4, b'C', b'a', b'm', 0]);
+    tiff.extend_from_slice(&[0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, orientation, 0, 0]);
+    tiff.extend_from_slice(&[0, 0, 0, 0]);
+    tiff
+}
+
+fn jpeg_with_exif(orientation: u8) -> Vec<u8> {
+    let mut jpeg = make_jpeg();
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&exif_tiff(orientation));
+    let mut segment = vec![0xFF, 0xE1];
+    segment.extend_from_slice(&(payload.len() as u16 + 2).to_be_bytes());
+    segment.extend_from_slice(&payload);
+    // After SOI and the JFIF APP0 segment.
+    assert_eq!(&jpeg[2..4], &[0xFF, 0xE0]);
+    let at = 4 + u16::from_be_bytes([jpeg[4], jpeg[5]]) as usize;
+    jpeg.splice(at..at, segment);
+    jpeg
+}
+
+fn png_with_exif(orientation: u8) -> Vec<u8> {
+    let mut png = make_png();
+    let data = exif_tiff(orientation);
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in b"eXIf".iter().chain(&data) {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                0xEDB8_8320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(b"eXIf");
+    chunk.extend_from_slice(&data);
+    chunk.extend_from_slice(&(!crc).to_be_bytes());
+    // After the signature (8) and IHDR (25).
+    png.splice(33..33, chunk);
+    png
+}
+
+/// The orientation a viewer would apply to the optimized file.
+fn orientation_of(bytes: &[u8]) -> Option<u8> {
+    let find = |needle: &[u8]| bytes.windows(needle.len()).position(|w| w == needle);
+    let tiff = if bytes.starts_with(&[0xFF, 0xD8]) {
+        &bytes[find(b"Exif\0\0")? + 6..]
+    } else {
+        &bytes[find(b"eXIf")? + 4..]
+    };
+    imageopt_core::metadata::display_orientation(tiff)
+}
+
+/// Browsers turn JPEG and PNG pictures by their EXIF orientation. Stripping it
+/// with the other metadata would show the picture rotated.
+#[test]
+fn exif_orientation_survives_every_mode() {
+    let modes = [
+        (false, MetadataPolicy::KeepColorProfile),
+        (false, MetadataPolicy::StripAll),
+        (false, MetadataPolicy::KeepAll),
+        (true, MetadataPolicy::StripAll),
+    ];
+    for (name, input) in [("jpeg", jpeg_with_exif(6)), ("png", png_with_exif(6))] {
+        assert_eq!(orientation_of(&input), Some(6), "{name} fixture");
+        assert!(image::load_from_memory(&input).is_ok(), "{name} fixture");
+        for (lossy, metadata) in modes {
+            let opts = OptimizeOptions {
+                lossy,
+                metadata,
+                min_savings_percent: 0.0,
+                ..Default::default()
+            };
+            let out = optimize_bytes(&input, &opts).unwrap();
+            let case = format!("{name} lossy={lossy} {metadata:?}: {:?}", out.status);
+            assert!(
+                !matches!(out.status, OptimizeStatus::Failed { .. }),
+                "{case}"
+            );
+            assert_eq!(orientation_of(&out.bytes), Some(6), "{case}");
+            assert!(image::load_from_memory(&out.bytes).is_ok(), "{case}");
+            // Only keep-all keeps the rest of the EXIF data.
+            let has_make = out.bytes.windows(4).any(|w| w == b"Cam\0");
+            assert_eq!(has_make, metadata == MetadataPolicy::KeepAll, "{case}");
+        }
+    }
+
+    // An upright picture needs no EXIF: it is stripped as before.
+    for (name, input) in [("jpeg", jpeg_with_exif(1)), ("png", png_with_exif(1))] {
+        let out = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
+        assert_eq!(out.status, OptimizeStatus::Optimized, "{name}");
+        assert!(!out.bytes.windows(4).any(|w| w == b"Cam\0"), "{name}");
+        assert!(
+            !out.bytes.windows(4).any(|w| w == b"Exif" || w == b"eXIf"),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn corrupt_jpeg_fails_without_panicking() {
     // Valid JPEG magic bytes followed by garbage.

@@ -13,6 +13,7 @@ use oxipng::{Options, StripChunks};
 
 use super::{CandidateSet, Optimizer};
 use crate::error::Error;
+use crate::metadata::{display_orientation, keep_all, orientation_only_tiff};
 use crate::options::{MetadataPolicy, OptimizeOptions};
 
 pub struct PngOptimizer;
@@ -30,15 +31,43 @@ impl Optimizer for PngOptimizer {
         if animated && matches!(options.strip, StripChunks::All) {
             options.strip = StripChunks::Keep(oxipng::indexset! {*b"acTL", *b"fcTL", *b"fdAT"});
         }
-        let lossless = oxipng::optimize_from_memory(input, &options)
+        // Browsers rotate a PNG by its EXIF orientation. Keep the `eXIf`
+        // chunk of a rotated image when metadata is stripped; without the
+        // tag the picture would be shown turned.
+        let orientation = exif_chunk(input)
+            .map(|(_, data)| data)
+            .and_then(display_orientation);
+        let rotated = orientation.is_some();
+        if rotated {
+            options.strip = match options.strip {
+                StripChunks::All => StripChunks::Keep(oxipng::indexset! {*b"eXIf"}),
+                StripChunks::Keep(mut kept) => {
+                    kept.insert(*b"eXIf");
+                    StripChunks::Keep(kept)
+                }
+                // The chunks "safe" keeps, plus `eXIf`.
+                StripChunks::Safe => StripChunks::Keep(oxipng::indexset! {
+                    *b"cICP", *b"iCCP", *b"sRGB", *b"pHYs", *b"acTL", *b"fcTL", *b"fdAT",
+                    *b"eXIf"
+                }),
+                other => other,
+            };
+        }
+        let mut lossless = oxipng::optimize_from_memory(input, &options)
             .map_err(|e| Error::Encode(format!("oxipng: {e}")))?;
+        // Unless everything is kept, the orientation is all that stays of the
+        // EXIF data.
+        if let (Some(orientation), false) = (orientation, keep_all(opts.metadata)) {
+            lossless = with_exif(&lossless, &orientation_only_tiff(orientation));
+        }
         out.push(lossless);
 
         // Lossy quantization rebuilds the PNG from RGBA pixels, discarding any
         // source metadata, so only offer it when the policy is to strip all.
         // It also decodes a single image: an animated PNG would come out as
         // its first frame only, so animation keeps the lossless pass alone.
-        if opts.allow_lossy_rebuild() && !animated {
+        // Nor can it carry the orientation over.
+        if opts.allow_lossy_rebuild() && !animated && !rotated {
             if let Ok(q) = quantize(input, opts) {
                 out.push(q);
             }
@@ -66,6 +95,50 @@ pub(crate) fn is_animated_png(input: &[u8]) -> bool {
         rest = next;
     }
     false
+}
+
+/// The first `eXIf` chunk of a PNG: its byte range (length field to CRC) and
+/// its data.
+fn exif_chunk(input: &[u8]) -> Option<(std::ops::Range<usize>, &[u8])> {
+    let mut at = 8usize;
+    loop {
+        let len = u32::from_be_bytes(input.get(at..at.checked_add(4)?)?.try_into().ok()?) as usize;
+        let kind = input.get(at + 4..at + 8)?;
+        let end = at.checked_add(len)?.checked_add(12)?;
+        let data = input.get(at + 8..end - 4)?;
+        match kind {
+            b"eXIf" => return Some((at..end, data)),
+            b"IEND" => return None,
+            _ => {}
+        }
+        at = end;
+    }
+}
+
+/// `png` with the data of its `eXIf` chunk replaced by `tiff`.
+fn with_exif(png: &[u8], tiff: &[u8]) -> Vec<u8> {
+    let Some((range, _)) = exif_chunk(png) else {
+        return png.to_vec();
+    };
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in b"eXIf".iter().chain(tiff) {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                0xEDB8_8320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    let mut out = Vec::with_capacity(png.len());
+    out.extend_from_slice(&png[..range.start]);
+    out.extend_from_slice(&(tiff.len() as u32).to_be_bytes());
+    out.extend_from_slice(b"eXIf");
+    out.extend_from_slice(tiff);
+    out.extend_from_slice(&(!crc).to_be_bytes());
+    out.extend_from_slice(&png[range.end..]);
+    out
 }
 
 fn oxipng_options(opts: &OptimizeOptions) -> Options {

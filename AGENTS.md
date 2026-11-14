@@ -77,6 +77,8 @@ pins `stable` plus clippy/rustfmt.
   The root `viewBox` and the absence of `width`/`height` must survive.
   `<title>`/`<desc>`/`aria-*` go only with strip-all; keep-all skips every
   SVG.
+* JPEG/PNG: an EXIF orientation of 2 to 8 survives every mode; a PNG with
+  one gets no pixel rebuild.
 * AVIF: detect, skip, no optimizer yet.
 * `optimize_paths` preserves input order. `--max-in-flight-mb` is a byte
   semaphore on on-disk size; a file larger than the budget still runs alone.
