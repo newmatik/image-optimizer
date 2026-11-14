@@ -124,6 +124,12 @@ jobs:
           [ "$after" -lt "$before" ]
           [ "$(head -c 8 smoke-assets/released.png | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ]
 
+      # The v0.2.1 wrapper downloads into a fixed folder and fails on a second
+      # use in the same job (fixed on main: one temp folder per use).
+      - name: Clear the v0.2.1 download folder
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/imageopt"
+
       - name: A second run finds nothing left to do
         uses: newmatik/image-optimizer@v0.2.1
         with:

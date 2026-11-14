@@ -117,13 +117,23 @@ runs:
           gh release download "$ver" --repo "$repo" --pattern "$pattern.sha256" --dir "$dir"
         fi
 
+        # Compare the hash ourselves instead of `sha256sum -c`: the checksum
+        # file of a Windows build has CRLF line ends, and the one of v0.2.1
+        # holds the bare hash without a file name. Both must verify.
         (
           cd "$dir"
+          archive=$(ls imageopt-*."$archive_ext" | head -n1)
+          expected=$(tr -d '\r' < "$archive.sha256" | awk 'NR==1 {print tolower($1)}')
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum -c ./*.sha256
+            actual=$(sha256sum "$archive" | awk '{print $1}')
           else
-            shasum -a 256 -c ./*.sha256
+            actual=$(shasum -a 256 "$archive" | awk '{print $1}')
           fi
+          if [ "${#expected}" -ne 64 ] || [ "$expected" != "$actual" ]; then
+            echo "::error::Checksum mismatch for $archive (expected '$expected', got '$actual')"
+            exit 1
+          fi
+          echo "$archive: checksum OK"
         )
 
         if [ "$archive_ext" = "zip" ]; then

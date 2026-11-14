@@ -210,8 +210,8 @@ Lint gate (fail the PR if images can still shrink):
 
 Pin a release tag (see [Releases](https://github.com/newmatik/image-optimizer/releases));
 there is no moving major tag such as `v1`. The tag also selects the wrapper:
-the one in `v0.2.1` runs on Linux and macOS only and does not verify the
-checksum. Windows runners and SHA-256 verification are on `main` and ship with
+the one in `v0.2.1` runs on Linux and macOS only, does not verify the
+checksum, and can be used only once per job. Windows runners and SHA-256 verification are on `main` and ship with
 the next release.
 
 Inputs: `paths` (required), `lossy`, `quality`, `min-savings`, `recursive`,
