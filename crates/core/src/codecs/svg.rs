@@ -161,6 +161,22 @@ impl Optimizer for SvgOptimizer {
                 "SVG root element is not an <svg> in the SVG namespace",
             ));
         }
+        // An `xml-stylesheet` other than CSS (XSLT) can read comments and
+        // whitespace, and rebuild the document from them. Without a `type`
+        // browsers take it as CSS.
+        let foreign_stylesheet = doc.root().children().any(|n| {
+            n.pi().is_some_and(|pi| {
+                let v = pi.value.unwrap_or("").to_ascii_lowercase();
+                pi.target == "xml-stylesheet"
+                    && v.contains("type")
+                    && !(v.contains("type=\"text/css\"") || v.contains("type='text/css'"))
+            })
+        });
+        if foreign_stylesheet {
+            return Ok(skipped(
+                "SVG has an xml-stylesheet that is not CSS, which can read the markup",
+            ));
+        }
         if has_scripting(&doc) {
             return Ok(skipped(
                 "SVG contains scripting or event handlers, which can observe the markup",
@@ -316,9 +332,12 @@ impl<'a> Rules<'a> {
             }
             for attr in node.attributes() {
                 let value = attr.value();
+                // Presentation attributes take CSS values too: `attr()` there
+                // reads other attributes as text.
+                let css = value.to_ascii_lowercase();
+                attribute_css |= css.contains("attr(");
                 if attr.name() == "style" {
-                    let css = value.to_ascii_lowercase();
-                    attribute_css |= css.contains("attr(") || css.contains('\\');
+                    attribute_css |= css.contains('\\');
                 }
                 if attr.name() != "id" {
                     escapes |= value.contains('\\');

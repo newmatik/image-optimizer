@@ -625,6 +625,29 @@ fn stylesheets_limit_what_is_rewritten() {
 
 #[test]
 fn scripted_and_unreadable_documents_are_skipped() {
+    // XSLT can read comments and whitespace.
+    for pi in [
+        r#"<?xml-stylesheet type="text/xsl" href="t.xsl"?>"#,
+        r#"<?xml-stylesheet href="t.xsl" type="application/xslt+xml"?>"#,
+    ] {
+        let input = format!(r#"{pi}<svg xmlns="{SVG}"><!-- c -->  <path d="M0.0 0"/></svg>"#);
+        assert_skipped(&input, MetadataPolicy::StripAll);
+    }
+    let css = format!(
+        r#"<?xml-stylesheet type="text/css" href="s.css"?><svg xmlns="{SVG}"><!-- c -->  <path d="M0.0 0"/></svg>"#
+    );
+    assert!(!matches!(
+        optimize(&css, MetadataPolicy::StripAll).status,
+        OptimizeStatus::Skipped { .. }
+    ));
+
+    // `attr()` in a presentation attribute reads other attributes as text.
+    let input = format!(
+        r#"<svg xmlns="{SVG}"><text x="10.0" font-family="attr(x)">a</text><!-- c --></svg>"#
+    );
+    let text = String::from_utf8(optimize(&input, MetadataPolicy::StripAll).bytes).unwrap();
+    assert!(text.contains(r#"x="10.0""#), "{text}");
+
     let cases = [
         format!(r#"<svg xmlns="{SVG}">  <script>alert(1)</script></svg>"#),
         format!(r#"<svg xmlns="{SVG}">  <rect width="10.0" height="10.0" onfocus="steal()"/></svg>"#),

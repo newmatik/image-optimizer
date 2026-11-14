@@ -170,7 +170,8 @@ Notes:
   stay as written too.
 * SVGs are skipped, untouched, when they contain a `<script>`, an embedded
   frame or object, `on*=` handlers or `javascript:` URLs (a script can read
-  the markup), declare entities,
+  the markup), use an `xml-stylesheet` that is not CSS (XSLT), declare
+  entities,
   are not UTF-8, have a root that is not an SVG `<svg>`, or nest elements
   deeper than 64 levels. A file that is not well-formed XML is reported as
   `failed`.
