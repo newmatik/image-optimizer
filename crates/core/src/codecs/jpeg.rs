@@ -293,8 +293,9 @@ fn orientation_marker(input: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The marker segments of a JPEG up to the first scan, as (marker, payload).
-/// Stops at anything that is not a marker: libjpeg skips such bytes, and
-/// they must not be read as a segment.
+/// Bytes between segments are skipped up to the next `0xFF` the way libjpeg's
+/// `next_marker` does: they are no segment, but a real segment after them
+/// is read by the decoder and must be read here too.
 fn jpeg_segments(input: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
     let mut i = if input.starts_with(&[0xFF, 0xD8]) {
         2
@@ -302,8 +303,8 @@ fn jpeg_segments(input: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
         input.len()
     };
     std::iter::from_fn(move || loop {
-        if input.get(i) != Some(&0xFF) {
-            return None;
+        while *input.get(i)? != 0xFF {
+            i += 1;
         }
         while input.get(i) == Some(&0xFF) {
             i += 1;
@@ -313,8 +314,8 @@ fn jpeg_segments(input: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
         match marker {
             // Start of scan, end of image: no more headers.
             0xDA | 0xD9 => return None,
-            // Markers without a length.
-            0x01 | 0xD0..=0xD7 => continue,
+            // `FF 00` is no marker; markers without a length.
+            0x00 | 0x01 | 0xD0..=0xD7 => continue,
             _ => {}
         }
         let len = u16::from_be_bytes([*input.get(i)?, *input.get(i + 1)?]) as usize;

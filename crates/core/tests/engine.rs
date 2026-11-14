@@ -959,10 +959,13 @@ fn jpeg_with_exif(orientation: u8) -> Vec<u8> {
 }
 
 fn png_with_exif(orientation: u8) -> Vec<u8> {
-    let mut png = make_png();
-    let data = exif_tiff(orientation);
+    png_with_chunk(make_png(), b"eXIf", &exif_tiff(orientation))
+}
+
+/// `png` with a chunk inserted right after IHDR.
+fn png_with_chunk(mut png: Vec<u8>, kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut crc = 0xFFFF_FFFFu32;
-    for &byte in b"eXIf".iter().chain(&data) {
+    for &byte in kind.iter().chain(data) {
         crc ^= byte as u32;
         for _ in 0..8 {
             crc = if crc & 1 != 0 {
@@ -973,8 +976,8 @@ fn png_with_exif(orientation: u8) -> Vec<u8> {
         }
     }
     let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
-    chunk.extend_from_slice(b"eXIf");
-    chunk.extend_from_slice(&data);
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
     chunk.extend_from_slice(&(!crc).to_be_bytes());
     // After the signature (8) and IHDR (25).
     png.splice(33..33, chunk);
@@ -1078,6 +1081,20 @@ fn exif_orientation_survives_every_mode() {
         }
     }
 
+    // Stray bytes before a real EXIF segment: the decoder skips them and
+    // reads the segment, so its orientation is kept as well.
+    let mut stray_then_exif = jpeg_with_exif(6);
+    let at = 4 + u16::from_be_bytes([stray_then_exif[4], stray_then_exif[5]]) as usize;
+    stray_then_exif.splice(at..at, [0x12, 0x34, 0x00]);
+    assert!(image::load_from_memory(&stray_then_exif).is_ok());
+    let out = optimize_bytes(&stray_then_exif, &OptimizeOptions::default()).unwrap();
+    assert!(
+        !matches!(out.status, OptimizeStatus::Failed { .. }),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(orientation_of(&out.bytes), Some(6), "{:?}", out.status);
+
     // An upright picture needs no EXIF: it is stripped as before.
     for (name, input) in [("jpeg", jpeg_with_exif(1)), ("png", png_with_exif(1))] {
         let out = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
@@ -1088,6 +1105,58 @@ fn exif_orientation_survives_every_mode() {
             "{name}"
         );
     }
+}
+
+/// The chunk types of a PNG, in file order.
+fn png_chunk_kinds(png: &[u8]) -> Vec<[u8; 4]> {
+    let mut kinds = Vec::new();
+    let mut at = 8;
+    while let Some(head) = png.get(at..at + 8) {
+        let len = u32::from_be_bytes(head[..4].try_into().unwrap()) as usize;
+        kinds.push(head[4..8].try_into().unwrap());
+        at += len + 12;
+    }
+    kinds
+}
+
+/// Keeping the orientation of a PNG must not cost it any chunk that
+/// `--strip color` keeps otherwise (the list it uses mirrors oxipng's).
+#[test]
+fn exif_orientation_keeps_the_safe_chunks() {
+    let mut plain = make_png();
+    for (kind, data) in [
+        (b"gAMA", &[0, 0, 0xB1, 0x8F][..]),
+        (
+            b"cHRM",
+            &[
+                0, 0, 0x7A, 0x26, 0, 0, 0x80, 0x84, 0, 0, 0xFA, 0, 0, 0, 0x80, 0xE8, 0, 0, 0x75,
+                0x30, 0, 0, 0xEA, 0x60, 0, 0, 0x3A, 0x98, 0, 0, 0x17, 0x70,
+            ][..],
+        ),
+        (b"sRGB", &[0][..]),
+        (b"pHYs", &[0, 0, 0x0B, 0x13, 0, 0, 0x0B, 0x13, 1][..]),
+        (b"tEXt", &b"Comment\0hello"[..]),
+    ] {
+        plain = png_with_chunk(plain, kind, data);
+    }
+    let rotated = png_with_chunk(plain.clone(), b"eXIf", &exif_tiff(6));
+    let opts = OptimizeOptions {
+        metadata: MetadataPolicy::KeepColorProfile,
+        min_savings_percent: 0.0,
+        ..Default::default()
+    };
+    let kinds = |input: &[u8]| {
+        let out = optimize_bytes(input, &opts).unwrap();
+        assert_eq!(out.status, OptimizeStatus::Optimized);
+        let mut kinds = png_chunk_kinds(&out.bytes);
+        kinds.retain(|k| k != b"eXIf");
+        kinds.sort();
+        kinds
+    };
+    let plain_kinds = kinds(&plain);
+    assert!(plain_kinds.contains(b"sRGB"), "{plain_kinds:?}");
+    assert!(!plain_kinds.contains(b"tEXt"), "{plain_kinds:?}");
+    assert_eq!(kinds(&rotated), plain_kinds);
 }
 
 #[test]

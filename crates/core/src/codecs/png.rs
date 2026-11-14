@@ -54,10 +54,11 @@ impl Optimizer for PngOptimizer {
                     StripChunks::Keep(kept)
                 }
                 // The chunks "safe" keeps, plus `eXIf`.
-                StripChunks::Safe => StripChunks::Keep(oxipng::indexset! {
-                    *b"cICP", *b"iCCP", *b"sRGB", *b"pHYs", *b"acTL", *b"fcTL", *b"fdAT",
-                    *b"eXIf"
-                }),
+                StripChunks::Safe => {
+                    let mut kept: oxipng::IndexSet<[u8; 4]> = SAFE_CHUNKS.into_iter().collect();
+                    kept.insert(*b"eXIf");
+                    StripChunks::Keep(kept)
+                }
                 other => other,
             };
         }
@@ -149,13 +150,20 @@ fn with_exif(png: &[u8], tiff: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The chunks oxipng's `StripChunks::Safe` keeps (its `DISPLAY_CHUNKS`, which
+/// it does not export). A rotated PNG is stripped with this list plus `eXIf`;
+/// `exif_orientation_keeps_the_safe_chunks` checks that it still matches.
+const SAFE_CHUNKS: [[u8; 4]; 7] = [
+    *b"cICP", *b"iCCP", *b"sRGB", *b"pHYs", *b"acTL", *b"fcTL", *b"fdAT",
+];
+
 fn oxipng_options(opts: &OptimizeOptions) -> Options {
     let level = opts.png_level.min(6);
     let mut o = Options::from_preset(level);
     o.strip = match opts.metadata {
         MetadataPolicy::StripAll => StripChunks::All,
-        // `Safe` removes metadata chunks that don't affect rendering while
-        // keeping color-affecting ones (iCCP/sRGB/gAMA/cHRM).
+        // `Safe` keeps the chunks in `SAFE_CHUNKS` (color space, pixel
+        // size, animation) and removes the rest.
         MetadataPolicy::KeepColorProfile => StripChunks::Safe,
         MetadataPolicy::KeepAll => StripChunks::None,
     };
