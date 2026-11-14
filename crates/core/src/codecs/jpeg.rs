@@ -18,7 +18,9 @@ use std::ptr;
 
 use super::{CandidateSet, Optimizer};
 use crate::error::Error;
-use crate::metadata::{display_orientation, keep_all, keep_color_profile, orientation_only_tiff};
+use crate::metadata::{
+    exif_orientation, keep_all, keep_color_profile, orientation_only_tiff, ExifOrientation,
+};
 use crate::options::OptimizeOptions;
 
 pub struct JpegOptimizer;
@@ -26,6 +28,15 @@ pub struct JpegOptimizer;
 impl Optimizer for JpegOptimizer {
     fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
         let mut out = Vec::new();
+
+        // Viewers turn the picture by its EXIF orientation. If that cannot
+        // be read, the EXIF block must not be stripped: leave the file alone.
+        if !keep_all(opts.metadata) && orientation_of(input) == ExifOrientation::Unreadable {
+            return Ok(CandidateSet::Skipped {
+                reason: "JPEG has EXIF data that could not be read; left untouched to keep its orientation"
+                    .to_string(),
+            });
+        }
 
         // A lossy re-encode discards ICC/EXIF/COM markers, so it may only be
         // offered when the policy is to strip everything (otherwise a smaller
@@ -258,19 +269,32 @@ fn lossy_reencode(input: &[u8], opts: &OptimizeOptions) -> Result<Vec<u8>, Error
 
 const EXIF_HEADER: &[u8] = b"Exif\0\0";
 
+/// What the EXIF data of a JPEG says about its orientation. EXIF data may
+/// continue over several `APP1` segments; they are read as one.
+fn orientation_of(input: &[u8]) -> ExifOrientation {
+    let mut tiff: Option<Vec<u8>> = None;
+    for (marker, data) in jpeg_segments(input) {
+        if let (0xE1, Some(part)) = (marker, data.strip_prefix(EXIF_HEADER)) {
+            tiff.get_or_insert_with(Vec::new).extend_from_slice(part);
+        }
+    }
+    tiff.map_or(ExifOrientation::Upright, |tiff| exif_orientation(&tiff))
+}
+
 /// An `APP1` payload that holds only the orientation of `input`, if that
 /// orientation turns or mirrors the picture.
 fn orientation_marker(input: &[u8]) -> Option<Vec<u8>> {
-    let tiff = jpeg_segments(input)
-        .filter(|(marker, _)| *marker == 0xE1)
-        .find_map(|(_, data)| data.strip_prefix(EXIF_HEADER))?;
-    let orientation = display_orientation(tiff)?;
+    let ExifOrientation::Turned(orientation) = orientation_of(input) else {
+        return None;
+    };
     let mut payload = EXIF_HEADER.to_vec();
     payload.extend_from_slice(&orientation_only_tiff(orientation));
     Some(payload)
 }
 
 /// The marker segments of a JPEG up to the first scan, as (marker, payload).
+/// Stops at anything that is not a marker: libjpeg skips such bytes, and
+/// they must not be read as a segment.
 fn jpeg_segments(input: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
     let mut i = if input.starts_with(&[0xFF, 0xD8]) {
         2
@@ -278,6 +302,9 @@ fn jpeg_segments(input: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
         input.len()
     };
     std::iter::from_fn(move || loop {
+        if input.get(i) != Some(&0xFF) {
+            return None;
+        }
         while input.get(i) == Some(&0xFF) {
             i += 1;
         }

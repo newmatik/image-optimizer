@@ -1026,6 +1026,58 @@ fn exif_orientation_survives_every_mode() {
         }
     }
 
+    // EXIF data split over two APP1 segments is read as one.
+    let whole = jpeg_with_exif(6);
+    let at = whole.windows(6).position(|w| w == b"Exif\0\0").unwrap() - 4;
+    let len = u16::from_be_bytes([whole[at + 2], whole[at + 3]]) as usize;
+    let tiff = &whole[at + 10..at + 2 + len];
+    let (first, second) = tiff.split_at(9);
+    let mut split = whole[..at].to_vec();
+    for part in [first, second] {
+        split.extend_from_slice(&[0xFF, 0xE1]);
+        split.extend_from_slice(&(part.len() as u16 + 8).to_be_bytes());
+        split.extend_from_slice(b"Exif\0\0");
+        split.extend_from_slice(part);
+    }
+    split.extend_from_slice(&whole[at + 2 + len..]);
+    let out = optimize_bytes(&split, &OptimizeOptions::default()).unwrap();
+    assert_eq!(out.status, OptimizeStatus::Optimized);
+    assert_eq!(orientation_of(&out.bytes), Some(6));
+
+    // EXIF data that cannot be read is not stripped: the file stays as it is.
+    let mut broken = jpeg_with_exif(6);
+    let tiff_at = broken.windows(6).position(|w| w == b"Exif\0\0").unwrap() + 6;
+    broken[tiff_at + 7] = 0xF0; // first IFD far outside the data
+    let out = optimize_bytes(&broken, &OptimizeOptions::default()).unwrap();
+    assert!(
+        matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(out.bytes, broken);
+    let keep = OptimizeOptions {
+        metadata: MetadataPolicy::KeepAll,
+        ..Default::default()
+    };
+    assert_eq!(
+        optimize_bytes(&broken, &keep).unwrap().status,
+        OptimizeStatus::Optimized
+    );
+
+    // Bytes that look like an EXIF segment but have no marker prefix are not
+    // one (decoders skip them): no orientation may be invented.
+    let mut stray = make_jpeg();
+    let at = 4 + u16::from_be_bytes([stray[4], stray[5]]) as usize;
+    let mut fake = vec![0xE1, 0x00, 0x22];
+    fake.extend_from_slice(b"Exif\0\0");
+    fake.extend_from_slice(&imageopt_core::metadata::orientation_only_tiff(6));
+    stray.splice(at..at, fake);
+    if let Ok(out) = optimize_bytes(&stray, &OptimizeOptions::default()) {
+        if out.status == OptimizeStatus::Optimized {
+            assert!(!out.bytes.windows(4).any(|w| w == b"Exif"));
+        }
+    }
+
     // An upright picture needs no EXIF: it is stripped as before.
     for (name, input) in [("jpeg", jpeg_with_exif(1)), ("png", png_with_exif(1))] {
         let out = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();

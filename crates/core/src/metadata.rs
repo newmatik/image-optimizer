@@ -16,10 +16,33 @@ pub fn keep_all(policy: MetadataPolicy) -> bool {
     matches!(policy, MetadataPolicy::KeepAll)
 }
 
-/// The EXIF orientation of an image if it asks viewers to rotate or mirror the
-/// pixels (values 2 to 8). Browsers apply it to JPEG and PNG, so dropping it
-/// with the rest of the EXIF data would change the picture on screen.
+/// What the EXIF data of an image says about how to show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExifOrientation {
+    /// No orientation tag, or one that leaves the pixels as stored.
+    Upright,
+    /// Viewers rotate or mirror the pixels (values 2 to 8). Browsers apply
+    /// this to JPEG and PNG, so dropping it with the rest of the EXIF data
+    /// would change the picture on screen.
+    Turned(u8),
+    /// The data could not be read far enough to tell.
+    Unreadable,
+}
+
+/// Read the orientation from EXIF data (a TIFF structure).
+pub fn exif_orientation(tiff: &[u8]) -> ExifOrientation {
+    read_orientation(tiff).unwrap_or(ExifOrientation::Unreadable)
+}
+
+/// The orientation value if it turns the picture.
 pub fn display_orientation(tiff: &[u8]) -> Option<u8> {
+    match exif_orientation(tiff) {
+        ExifOrientation::Turned(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn read_orientation(tiff: &[u8]) -> Option<ExifOrientation> {
     const ORIENTATION: u16 = 0x0112;
     const SHORT: u16 = 3;
 
@@ -55,13 +78,13 @@ pub fn display_orientation(tiff: &[u8]) -> Option<u8> {
             if u16_at(entry + 2)? != SHORT || u32_at(entry + 4)? != 1 {
                 return None;
             }
-            return match u16_at(entry + 8)? {
-                value @ 2..=8 => Some(value as u8),
-                _ => None,
-            };
+            return Some(match u16_at(entry + 8)? {
+                value @ 2..=8 => ExifOrientation::Turned(value as u8),
+                _ => ExifOrientation::Upright,
+            });
         }
     }
-    None
+    Some(ExifOrientation::Upright)
 }
 
 /// A TIFF structure that holds nothing but the orientation tag: what is kept
@@ -114,10 +137,18 @@ mod tests {
         tiff.extend_from_slice(&[0, 0, 0, 0]);
         assert_eq!(display_orientation(&tiff), Some(6));
 
-        // Damaged data must not panic.
-        for cut in 0..tiff.len() {
-            let _ = display_orientation(&tiff[..cut]);
+        // Data that ends before the tag is unreadable, never "upright".
+        for cut in 0..32 {
+            assert_eq!(
+                exif_orientation(&tiff[..cut]),
+                ExifOrientation::Unreadable,
+                "{cut}"
+            );
         }
+        assert_eq!(
+            exif_orientation(&orientation_only_tiff(1)),
+            ExifOrientation::Upright
+        );
         assert_eq!(display_orientation(b"II*\0\xff\xff\xff\xff"), None);
         assert_eq!(display_orientation(b"XX*\0\x08\0\0\0"), None);
     }

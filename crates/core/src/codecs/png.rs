@@ -13,7 +13,7 @@ use oxipng::{Options, StripChunks};
 
 use super::{CandidateSet, Optimizer};
 use crate::error::Error;
-use crate::metadata::{display_orientation, keep_all, orientation_only_tiff};
+use crate::metadata::{exif_orientation, keep_all, orientation_only_tiff, ExifOrientation};
 use crate::options::{MetadataPolicy, OptimizeOptions};
 
 pub struct PngOptimizer;
@@ -34,9 +34,17 @@ impl Optimizer for PngOptimizer {
         // Browsers rotate a PNG by its EXIF orientation. Keep the `eXIf`
         // chunk of a rotated image when metadata is stripped; without the
         // tag the picture would be shown turned.
-        let orientation = exif_chunk(input)
-            .map(|(_, data)| data)
-            .and_then(display_orientation);
+        let orientation = match exif_chunk(input).map(|(_, data)| exif_orientation(data)) {
+            Some(ExifOrientation::Turned(value)) => Some(value),
+            // Not readable: stripping could drop an orientation.
+            Some(ExifOrientation::Unreadable) if !keep_all(opts.metadata) => {
+                return Ok(CandidateSet::Skipped {
+                    reason: "PNG has EXIF data that could not be read; left untouched to keep its orientation"
+                        .to_string(),
+                });
+            }
+            _ => None,
+        };
         let rotated = orientation.is_some();
         if rotated {
             options.strip = match options.strip {
