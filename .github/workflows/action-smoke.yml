@@ -11,12 +11,20 @@ concurrency:
 
 jobs:
   smoke:
-    name: Composite action (${{ matrix.os }})
+    # "Composite action" is a required status check: the Linux job keeps
+    # exactly that name.
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            name: Composite action
+          - os: macos-latest
+            name: Composite action (macos-latest)
+          - os: windows-latest
+            name: Composite action (windows-latest)
     steps:
       - uses: actions/checkout@v7
         with:
