@@ -27,10 +27,11 @@ webp = "0.3"
 # safe to call concurrently (global state, exit()). Static GIFs use the
 # thread-safe pure-Rust `gif` crate; animated GIFs are left untouched.
 gif = "0.14"
-usvg = "0.49"
-# Same XML parser usvg uses; the SVG codec inspects the parsed document before
-# handing it to usvg.
+# XML parser the SVG minifier uses to locate what it edits and to check its
+# own output.
 roxmltree = "0.21"
+# Tests only: an independent SVG reader to compare source and output geometry.
+usvg = "0.49"
 
 # --- engine support ---
 rayon = "1"
