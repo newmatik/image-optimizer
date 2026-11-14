@@ -5,6 +5,8 @@
 //! reads source and output with a plain XML walk, and `geometry` reads them
 //! with usvg, a separate SVG implementation.
 
+#![cfg(feature = "svg")]
+
 use imageopt_core::{optimize_bytes, MetadataPolicy, OptimizeOptions, OptimizeStatus};
 
 const SVG: &str = "http://www.w3.org/2000/svg";
@@ -928,7 +930,10 @@ fn mutated_documents_never_panic_or_change_meaning() {
                     }
                 }
                 Ok(_) => {}
-                Err(error) => assert!(!error.to_string().contains("panic"), "{error} for {input}"),
+                Err(error) => assert!(
+                    !matches!(error, imageopt_core::Error::Panicked(_)),
+                    "{error} for {input}"
+                ),
             }
         }
     }

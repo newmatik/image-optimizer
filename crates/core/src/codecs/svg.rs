@@ -850,11 +850,11 @@ fn minify_number_value(kind: NumberKind, raw: &str, lossy: bool) -> Option<Strin
             if !numbers.iter().all(|n| is_ordinary(n)) {
                 return None;
             }
-            let mut out = String::with_capacity(raw.len());
-            for (i, number) in numbers.iter().enumerate() {
-                push_number(&mut out, &round_or_shorten(number, lossy), i > 0);
-            }
-            Some(out)
+            // Always a space between numbers: a sign alone may separate the
+            // two coordinates of a point, but Firefox rejects it between two
+            // points (`0 0-10 10`).
+            let numbers: Vec<String> = numbers.iter().map(|n| round_or_shorten(n, lossy)).collect();
+            Some(numbers.join(" "))
         }
         NumberKind::Single => {
             let (number, unit) = split_unit(raw)?;
@@ -914,7 +914,8 @@ fn skip_spaces(b: &[u8], mut i: usize) -> usize {
 }
 
 /// Numbers separated by whitespace and single commas. `None` if anything else
-/// is in the value.
+/// is in the value, including a comma after the last number (browsers reject
+/// the whole list then; the rewrite must not drop it and make it valid).
 fn parse_number_list(value: &str) -> Option<Vec<&str>> {
     let b = value.as_bytes();
     let mut numbers = Vec::new();
@@ -923,6 +924,9 @@ fn parse_number_list(value: &str) -> Option<Vec<&str>> {
         let end = number_end(b, i)?;
         numbers.push(&value[i..end]);
         i = skip_separator(b, end);
+        if i >= b.len() && b[end..].contains(&b',') {
+            return None;
+        }
     }
     (!numbers.is_empty()).then_some(numbers)
 }
@@ -1622,8 +1626,15 @@ mod tests {
         let list = |v: &str, lossy| minify_number_value(NumberKind::List, v, lossy);
         assert_eq!(
             list(" 0.0,10.50 20.000,-5.0 ", false).unwrap(),
-            "0 10.5 20-5"
+            "0 10.5 20 -5"
         );
+        // A sign never separates two numbers of a list.
+        assert_eq!(list("0 0 -10 10 0 20", false).unwrap(), "0 0 -10 10 0 20");
+        // A trailing comma makes the list invalid: it is kept as written.
+        assert_eq!(list("0 0 10 10,", false), None);
+        assert_eq!(list("0 0 10 10 , ", false), None);
+        assert_eq!(list(",0 0", false), None);
+        assert_eq!(list("0,,0", false), None);
         assert_eq!(list("1.23456 2.5", true).unwrap(), "1.235 2.5");
         assert_eq!(list("1 2 x", false), None);
         assert_eq!(list("", false), None);
