@@ -501,25 +501,37 @@ fn subtree_animates(node: Node<'_, '_>) -> bool {
 /// delimiter (`#id`, `url(#id)`, `other.svg#id`). Generous on purpose: a
 /// token that is no reference only keeps an element that could have gone.
 fn collect_reference_tokens(value: &str, tokens: &mut HashSet<String>) {
+    // Fragments of the whole value: an id may contain `,` or `;`
+    // (`href="#a,b"`). Each piece is looked at once, so this stays linear.
+    for piece in value.split('#').skip(1) {
+        collect_fragment(piece, &[' ', '\t', '\r', '\n'], tokens);
+    }
     for word in value.split(|c: char| c.is_whitespace() || matches!(c, ';' | ',')) {
         if word.is_empty() {
             continue;
+        }
+        for piece in word.split('#').skip(1) {
+            collect_fragment(piece, &[], tokens);
         }
         tokens.insert(word.to_string());
         if let Some((before_dot, _)) = word.split_once('.') {
             tokens.insert(before_dot.to_string());
         }
-        // Each piece is looked at once, so a value of many `#` stays linear.
-        for piece in word.split('#').skip(1) {
-            let end = piece.find([')', '"', '\'']).unwrap_or(piece.len());
-            let fragment = &piece[..end];
-            // Browsers decode a URL fragment: `#%61` names `a`.
-            if fragment.contains('%') {
-                tokens.insert(percent_decoded(fragment));
-            }
-            tokens.insert(fragment.to_string());
-        }
     }
+}
+
+/// The fragment at the start of `piece` (the text after a `#`), up to a
+/// closing delimiter or one of `extra_ends`, as written and decoded.
+fn collect_fragment(piece: &str, extra_ends: &[char], tokens: &mut HashSet<String>) {
+    let end = piece
+        .find(|c: char| matches!(c, ')' | '"' | '\'') || extra_ends.contains(&c))
+        .unwrap_or(piece.len());
+    let fragment = &piece[..end];
+    // Browsers decode a URL fragment: `#%61` names `a`.
+    if fragment.contains('%') {
+        tokens.insert(percent_decoded(fragment));
+    }
+    tokens.insert(fragment.to_string());
 }
 
 /// `text` with every `%XX` escape decoded (as UTF-8, invalid bytes replaced).
@@ -1165,6 +1177,64 @@ fn round_path(segments: &[Segment<'_>]) -> Option<Vec<Vec<String>>> {
         out[index].push(text);
         Some(if relative { read_origin + value } else { value })
     })?;
+    // Renderers add relative coordinates up in single precision. Far from the
+    // origin its steps are coarse, and rounded steps can then add up to a
+    // different point than the original ones: keep such a path as it is.
+    let source: Vec<Vec<&str>> = segments.iter().map(|s| s.args.clone()).collect();
+    let before = single_precision_coordinates(segments, &source)?;
+    let after = single_precision_coordinates(segments, &out)?;
+    before
+        .iter()
+        .zip(&after)
+        .all(|(&a, &b)| {
+            let ulp = f64::from(a.abs().max(b.abs())) * f64::from(f32::EPSILON);
+            (f64::from(a) - f64::from(b)).abs() <= LOSSY_TOLERANCE + ulp
+        })
+        .then_some(out)
+}
+
+/// Absolute position of every coordinate of a path with the arguments `args`,
+/// added up in single precision the way renderers do. `None` for arcs and
+/// smooth curves, as in [`walk_path`].
+fn single_precision_coordinates<S: AsRef<str>>(
+    segments: &[Segment<'_>],
+    args: &[Vec<S>],
+) -> Option<Vec<f32>> {
+    let mut out = Vec::new();
+    let mut current = [0.0f32; 2];
+    let mut start = current;
+    for (segment, args) in segments.iter().zip(args) {
+        let upper = segment.command.to_ascii_uppercase();
+        let relative = segment.command.is_ascii_lowercase();
+        match upper {
+            b'Z' => {
+                current = start;
+                continue;
+            }
+            b'A' | b'S' | b'T' => return None,
+            _ => {}
+        }
+        let mut end = current;
+        for (k, arg) in args.iter().enumerate() {
+            let axis = match upper {
+                b'H' => 0,
+                b'V' => 1,
+                _ => k % 2,
+            };
+            let value = arg.as_ref().parse::<f32>().ok().filter(|v| v.is_finite())?;
+            let target = if relative {
+                current[axis] + value
+            } else {
+                value
+            };
+            end[axis] = target;
+            out.push(target);
+        }
+        current = end;
+        if upper == b'M' {
+            start = current;
+        }
+    }
     Some(out)
 }
 
@@ -1574,10 +1644,13 @@ mod tests {
             "h i",
             "url(#%6B)",
             "#%C3%A9%",
+            "#l,m;n",
         ] {
             collect_reference_tokens(value, &mut tokens);
         }
-        for id in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "é%"] {
+        for id in [
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "é%", "l,m;n",
+        ] {
             assert!(tokens.contains(id), "{id}");
         }
         assert!(!tokens.contains("j"));
@@ -1640,6 +1713,17 @@ mod tests {
         ] {
             assert_eq!(path(bad, false), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn lossy_rounding_stays_within_tolerance_in_single_precision() {
+        // Far from the origin, single precision drops these steps: the
+        // original ends where it starts, a rounded copy would not.
+        let data = format!("M100000 100000{}", "l.0039 .0039".repeat(1000));
+        let out = path(&data, true).unwrap();
+        assert_eq!(out, path(&data, false).unwrap());
+        // Near the origin the path is still rounded.
+        assert_eq!(path("M1 1l.12345 .12345", true).unwrap(), "M1 1l.123 .123");
     }
 
     #[test]

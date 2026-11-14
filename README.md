@@ -178,8 +178,10 @@ Notes:
   value or element position, from outside the file.
 * `--lossy` also rounds coordinates to 3 decimals, in the units of the file
   (`viewBox`). Error does not add up along a path; no point moves by more than
-  0.0005 units. Paths with arcs or smooth curves (`S`, `T`) and the root
-  element (size, `viewBox`) keep all digits. Hairlines that are exactly
+  0.0005 units, also when a renderer adds the steps up in single precision
+  (a path where it would not hold keeps its digits). Paths with arcs or
+  smooth curves (`S`, `T`) and the root element (size, `viewBox`) keep all
+  digits. Hairlines that are exactly
   diagonal can change their antialiasing slightly.
 * An EXIF orientation that turns or mirrors a JPEG or PNG is kept in every
   mode (as a minimal EXIF block when metadata is stripped): viewers apply it,
