@@ -35,3 +35,4 @@ svg = ["dep:usvg", "dep:roxmltree"]
 gif = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "gif"] }
 webp = { workspace = true }
+rayon = { workspace = true }

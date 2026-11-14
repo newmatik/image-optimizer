@@ -1061,47 +1061,63 @@ fn in_flight_byte_budget_never_stalls_the_pool() {
     }
     drop(done);
     for _ in 0..workers {
-        finished
+        if finished
             .recv_timeout(std::time::Duration::from_secs(180))
-            .expect("a budgeted PNG batch stalled or failed");
+            .is_err()
+        {
+            stalled("a budgeted PNG batch");
+        }
     }
 }
 
-/// The budget caps what is in flight: with room for two files, never more than
-/// two run at once.
+/// A caller that is itself a pool worker (a service that runs batches on the
+/// pool, or a caller-installed pool) must not stall either: with one worker
+/// there is nobody else to run the files.
 #[test]
-fn in_flight_byte_budget_limits_concurrency() {
+fn in_flight_byte_budget_works_when_called_from_a_pool_worker() {
     let dir = tempfile::tempdir().unwrap();
     let png = make_png();
-    let paths: Vec<_> = (0..12)
+    let paths: Vec<_> = (0..6)
         .map(|i| {
             let p = dir.path().join(format!("img{i}.png"));
             std::fs::write(&p, &png).unwrap();
             p
         })
         .collect();
-    let opts = OptimizeOptions {
-        max_in_flight_bytes: Some(png.len() as u64 * 2),
-        ..Default::default()
-    };
 
-    let running = AtomicUsize::new(0);
-    let most = AtomicUsize::new(0);
-    let results = optimize_paths(&paths, &opts, &OutputSink::DryRun, |ev| match ev {
-        ProgressEvent::Started { .. } => {
-            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
-            most.fetch_max(now, Ordering::SeqCst);
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for threads in [1, 2] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let opts = OptimizeOptions {
+                max_in_flight_bytes: Some(1),
+                ..Default::default()
+            };
+            let results =
+                pool.install(|| optimize_paths(&paths, &opts, &OutputSink::DryRun, |_| {}));
+            for (r, p) in results.iter().zip(&paths) {
+                assert_eq!(r.source.as_ref(), Some(p), "order must be preserved");
+                assert_eq!(r.status, OptimizeStatus::Optimized);
+            }
         }
-        ProgressEvent::Finished { .. } => {
-            running.fetch_sub(1, Ordering::SeqCst);
-        }
+        let _ = done.send(());
     });
+    if finished
+        .recv_timeout(std::time::Duration::from_secs(180))
+        .is_err()
+    {
+        stalled("a budgeted batch started on a pool worker");
+    }
+}
 
-    assert_eq!(results.len(), paths.len());
-    // `Finished` is reported just after the budget is returned, so a third
-    // file can start before the callback of the second has counted down.
-    assert!(most.load(Ordering::SeqCst) <= 3, "{most:?} files at once");
-    assert!(most.load(Ordering::SeqCst) >= 1);
+/// A stalled pool takes every other test in this binary with it, and a panic
+/// here would not free it: report and end the process.
+fn stalled(what: &str) -> ! {
+    eprintln!("FAILED: {what} stalled or panicked; ending the test process");
+    std::process::exit(1);
 }
 
 #[test]

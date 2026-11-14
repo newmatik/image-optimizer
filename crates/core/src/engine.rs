@@ -355,6 +355,20 @@ impl ByteSemaphore {
         }
     }
 
+    /// Like [`ByteSemaphore::acquire`], but returns `None` instead of waiting.
+    fn try_acquire(&self, want: u64) -> Option<InFlightPermit<'_>> {
+        let want = want.clamp(1, self.budget);
+        let mut available = self.available.lock().unwrap_or_else(|e| e.into_inner());
+        if *available < want {
+            return None;
+        }
+        *available -= want;
+        Some(InFlightPermit {
+            sem: self,
+            amount: want,
+        })
+    }
+
     fn release(&self, amount: u64) {
         let mut available = self.available.lock().unwrap_or_else(|e| e.into_inner());
         *available += amount;
@@ -415,30 +429,44 @@ where
             .collect();
     };
 
-    // The budget must never be awaited on a pool worker. A worker that waits
-    // for a nested job runs other jobs meanwhile; if it took the next file and
-    // blocked on the budget, a codec task suspended below it on the same stack
-    // could not finish, and the file holding the budget may be waiting for
-    // exactly that task (oxipng evaluates candidates on the pool). So one
-    // plain thread admits the files: it takes the budget, then hands the file
-    // to the pool. Pool workers only ever release budget.
+    // The budget must never be awaited with a blocking wait on a pool worker.
+    // A worker that waits for a nested job runs other jobs meanwhile; if it
+    // took the next file and blocked on the budget, a codec task suspended
+    // below it on the same stack could not finish, and the file holding the
+    // budget may be waiting for exactly that task (oxipng evaluates
+    // candidates on the pool). So the calling thread admits the files: it
+    // takes the budget, then hands the file to the pool. Pool workers that run
+    // files only ever release budget.
     let semaphore = ByteSemaphore::new(budget);
     let slots: Mutex<Vec<Option<OptimizeResult>>> = Mutex::new(vec![None; total]);
-    std::thread::scope(|threads| {
-        threads.spawn(|| {
-            rayon::in_place_scope(|pool| {
-                for (index, path) in paths.iter().enumerate() {
-                    // On-disk size is the proxy for a file's memory cost.
-                    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                    let permit = semaphore.acquire(size);
-                    let (run, slots) = (&run, &slots);
-                    pool.spawn(move |_| {
-                        let res = run(index, path, Some(permit));
-                        slots.lock().unwrap_or_else(|e| e.into_inner())[index] = Some(res);
-                    });
+    // Called from inside the pool, the caller is a worker itself. It must
+    // not sleep on the budget either: it keeps the pool's work going until
+    // budget is free.
+    let on_worker = rayon::current_thread_index().is_some();
+    rayon::in_place_scope(|pool| {
+        for (index, path) in paths.iter().enumerate() {
+            // On-disk size is the proxy for a file's memory cost.
+            let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            let permit = if on_worker {
+                loop {
+                    if let Some(permit) = semaphore.try_acquire(size) {
+                        break permit;
+                    }
+                    // Run a pending job (often the one that will free the
+                    // budget); with none pending, let other threads run.
+                    if rayon::yield_now() != Some(rayon::Yield::Executed) {
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
                 }
+            } else {
+                semaphore.acquire(size)
+            };
+            let (run, slots) = (&run, &slots);
+            pool.spawn(move |_| {
+                let res = run(index, path, Some(permit));
+                slots.lock().unwrap_or_else(|e| e.into_inner())[index] = Some(res);
             });
-        });
+        }
     });
 
     slots
@@ -569,5 +597,29 @@ fn result(
         optimized_size,
         status,
         elapsed: start.elapsed().max(Duration::ZERO),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_semaphore_hands_out_at_most_its_budget() {
+        let sem = ByteSemaphore::new(10);
+        let a = sem.try_acquire(6).expect("6 of 10 is free");
+        assert!(sem.try_acquire(5).is_none(), "only 4 are left");
+        let b = sem.try_acquire(4).expect("4 are left");
+        assert!(sem.try_acquire(1).is_none());
+        drop(a);
+        // A request above the budget is clamped: it needs all of it.
+        assert!(sem.try_acquire(100).is_none());
+        drop(b);
+        let all = sem.try_acquire(100).expect("the whole budget is free");
+        assert!(sem.try_acquire(1).is_none());
+        drop(all);
+        // A zero-sized file still takes one byte of budget.
+        let _one = sem.acquire(0);
+        assert!(sem.try_acquire(10).is_none());
     }
 }
