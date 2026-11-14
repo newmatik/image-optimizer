@@ -521,6 +521,14 @@ fn editor_data_stays_when_removing_it_could_change_the_image() {
         "{text}"
     );
 
+    // A percent-encoded fragment names the decoded id: `#%61` is `a`.
+    let encoded = format!(
+        r##"<svg xmlns="{SVG}" {ink} width="10" height="10"><metadata><rect id="a" width="10" height="10"/></metadata><use href="#%61"/>{VERBOSE_PATH}</svg>"##
+    );
+    let out = optimize(&encoded, MetadataPolicy::StripAll);
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(text.contains("<metadata><rect id=\"a\""), "{text}");
+
     // An animation acts on its target from inside the editor data.
     let animated = format!(
         r##"<svg xmlns="{SVG}" {ink} width="10" height="10"><metadata><set href="#r" attributeName="fill" to="red"/></metadata><rect id="r" width="10" height="10" fill="blue"/>{VERBOSE_PATH}</svg>"##

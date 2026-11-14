@@ -512,9 +512,38 @@ fn collect_reference_tokens(value: &str, tokens: &mut HashSet<String>) {
         // Each piece is looked at once, so a value of many `#` stays linear.
         for piece in word.split('#').skip(1) {
             let end = piece.find([')', '"', '\'']).unwrap_or(piece.len());
-            tokens.insert(piece[..end].to_string());
+            let fragment = &piece[..end];
+            // Browsers decode a URL fragment: `#%61` names `a`.
+            if fragment.contains('%') {
+                tokens.insert(percent_decoded(fragment));
+            }
+            tokens.insert(fragment.to_string());
         }
     }
+}
+
+/// `text` with every `%XX` escape decoded (as UTF-8, invalid bytes replaced).
+fn percent_decoded(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (b[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn is_editor_namespace(uri: &str) -> bool {
@@ -1543,10 +1572,12 @@ mod tests {
             "other.svg#e",
             "f.click+1s;g.end",
             "h i",
+            "url(#%6B)",
+            "#%C3%A9%",
         ] {
             collect_reference_tokens(value, &mut tokens);
         }
-        for id in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
+        for id in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "é%"] {
             assert!(tokens.contains(id), "{id}");
         }
         assert!(!tokens.contains("j"));
