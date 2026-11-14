@@ -423,6 +423,7 @@ impl<'a> Rules<'a> {
         non_rendered
             && node.parent().is_some_and(|p| self.inert_context(p))
             && !self.subtree_is_referenced(node)
+            && !subtree_animates(node)
     }
 
     /// Whether anything in the document could point at an id inside `node`.
@@ -473,6 +474,26 @@ impl<'a> Rules<'a> {
             round: self.lossy && element.id() != self.root,
         })
     }
+}
+
+/// SVG animation elements. They act on their target wherever they are, also
+/// inside `<metadata>` (`<set href="#r" attributeName="fill" to="red"/>`).
+const ANIMATION_ELEMENTS: &[&str] = &[
+    "animate",
+    "animateColor",
+    "animateMotion",
+    "animateTransform",
+    "discard",
+    "set",
+];
+
+/// Whether `node` or an element inside it is an SVG animation element.
+fn subtree_animates(node: Node<'_, '_>) -> bool {
+    node.descendants().any(|n| {
+        n.is_element()
+            && n.tag_name().namespace() == Some(SVG_NS)
+            && ANIMATION_ELEMENTS.contains(&n.tag_name().name())
+    })
 }
 
 /// Collect what a decoded attribute value could name: each word, each word up
@@ -913,17 +934,25 @@ fn skip_spaces(b: &[u8], mut i: usize) -> usize {
     i
 }
 
-/// Numbers separated by whitespace and single commas. `None` if anything else
-/// is in the value, including a comma after the last number (browsers reject
-/// the whole list then; the rewrite must not drop it and make it valid).
+/// The numbers of a point list, separated by whitespace and single commas.
+/// Without a separator, only a `-` may start the second number of a point
+/// (`10-30`), which is all Firefox accepts. `None` for anything else,
+/// including a comma after the last number: browsers reject such a list, and
+/// the rewrite must not turn it into a valid one.
 fn parse_number_list(value: &str) -> Option<Vec<&str>> {
     let b = value.as_bytes();
     let mut numbers = Vec::new();
     let mut i = skip_spaces(b, 0);
+    let mut separated = true;
     while i < b.len() {
+        let y_of_point = numbers.len() % 2 == 1 && b[i] == b'-';
+        if !(separated || y_of_point) {
+            return None;
+        }
         let end = number_end(b, i)?;
         numbers.push(&value[i..end]);
         i = skip_separator(b, end);
+        separated = i > end;
         if i >= b.len() && b[end..].contains(&b',') {
             return None;
         }
@@ -1634,6 +1663,11 @@ mod tests {
         assert_eq!(list("0 0 10 10,", false), None);
         assert_eq!(list("0 0 10 10 , ", false), None);
         assert_eq!(list(",0 0", false), None);
+        // Without a separator only `-` may start the y of a point.
+        assert_eq!(list("10-30 5-5", false).unwrap(), "10 -30 5 -5");
+        assert_eq!(list("0 0-50 50 50 0", false), None);
+        assert_eq!(list("1.5.5 0", false), None);
+        assert_eq!(list("1+2 0", false), None);
         assert_eq!(list("0,,0", false), None);
         assert_eq!(list("1.23456 2.5", true).unwrap(), "1.235 2.5");
         assert_eq!(list("1 2 x", false), None);

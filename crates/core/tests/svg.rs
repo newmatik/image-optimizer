@@ -521,6 +521,14 @@ fn editor_data_stays_when_removing_it_could_change_the_image() {
         "{text}"
     );
 
+    // An animation acts on its target from inside the editor data.
+    let animated = format!(
+        r##"<svg xmlns="{SVG}" {ink} width="10" height="10"><metadata><set href="#r" attributeName="fill" to="red"/></metadata><rect id="r" width="10" height="10" fill="blue"/>{VERBOSE_PATH}</svg>"##
+    );
+    let out = optimize(&animated, MetadataPolicy::StripAll);
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(text.contains("<metadata><set href=\"#r\""), "{text}");
+
     // An id nobody names does not keep editor data alive.
     let unused = format!(
         r##"<svg xmlns="{SVG}" {ink} width="10" height="10"><metadata id="m"><g id="shape"/></metadata><use href="#other"/>{VERBOSE_PATH}</svg>"##
