@@ -268,8 +268,8 @@ struct Rules<'a> {
     has_stylesheet: bool,
     /// Namespaces still used by an element or attribute after the removals.
     used_namespaces: HashSet<String>,
-    /// Every name an attribute value could use to point at an element.
-    reference_tokens: HashSet<String>,
+    /// Ids inside removable editor data that an attribute value may name.
+    referenced_ids: HashSet<String>,
     /// Elements that have a child element (only filled with a stylesheet).
     parents_of_elements: HashSet<roxmltree::NodeId>,
     root: roxmltree::NodeId,
@@ -284,7 +284,9 @@ impl<'a> Rules<'a> {
         // A stylesheet this codec cannot read: assume it matches anything.
         let mut opaque_css = has_stylesheet;
         let mut attribute_css = false;
-        let mut reference_tokens = HashSet::new();
+        // All attribute values except ids, as written and with URL escapes
+        // decoded (`#%61` names `a`), one per line.
+        let mut reference_text = String::new();
         // A CSS escape can spell an id in a way the tokens do not show
         // (`url(#\\67)` names `g`), so with a backslash anywhere in a value
         // or sheet nothing that could be referenced is removed.
@@ -320,7 +322,12 @@ impl<'a> Rules<'a> {
                 }
                 if attr.name() != "id" {
                     escapes |= value.contains('\\');
-                    collect_reference_tokens(value, &mut reference_tokens);
+                    reference_text.push_str(value);
+                    reference_text.push('\n');
+                    if value.contains('%') {
+                        reference_text.push_str(&percent_decoded(value));
+                        reference_text.push('\n');
+                    }
                 }
             }
         }
@@ -335,15 +342,23 @@ impl<'a> Rules<'a> {
         };
 
         let keep_everything = keep_all(opts.metadata);
+        let mut strip_editor_data = !keep_everything && !has_stylesheet && !escapes;
+        let referenced_ids = if strip_editor_data {
+            referenced_editor_ids(doc, &reference_text)
+        } else {
+            Some(HashSet::new())
+        };
+        // Too much to search: keep all editor data.
+        strip_editor_data &= referenced_ids.is_some();
         let mut rules = Rules {
             text,
             strip_comments: !keep_everything,
-            strip_editor_data: !keep_everything && !has_stylesheet && !escapes,
+            strip_editor_data,
             rewrite_numbers: !opaque_css && !attribute_css,
             lossy: opts.lossy,
             has_stylesheet,
             used_namespaces: HashSet::new(),
-            reference_tokens,
+            referenced_ids: referenced_ids.unwrap_or_default(),
             parents_of_elements,
             root: doc.root_element().id(),
         };
@@ -414,13 +429,7 @@ impl<'a> Rules<'a> {
         if !self.strip_editor_data || !node.is_element() {
             return false;
         }
-        let name = node.tag_name();
-        let non_rendered = match name.namespace() {
-            Some(SVG_NS) => name.name() == "metadata",
-            Some(ns) => is_editor_namespace(ns),
-            None => false,
-        };
-        non_rendered
+        is_editor_element(node)
             && node.parent().is_some_and(|p| self.inert_context(p))
             && !self.subtree_is_referenced(node)
             && !subtree_animates(node)
@@ -432,7 +441,7 @@ impl<'a> Rules<'a> {
             .filter(|n| n.is_element())
             .flat_map(|n| n.attributes())
             .filter(|a| a.name() == "id")
-            .any(|a| self.reference_tokens.contains(a.value().trim()))
+            .any(|a| self.referenced_ids.contains(a.value().trim()))
     }
 
     fn drops_attribute(&self, namespace: Option<&str>) -> bool {
@@ -496,42 +505,47 @@ fn subtree_animates(node: Node<'_, '_>) -> bool {
     })
 }
 
-/// Collect what a decoded attribute value could name: each word, each word up
-/// to a `.` (`begin="id.click"`), and everything after a `#` up to a closing
-/// delimiter (`#id`, `url(#id)`, `other.svg#id`). Generous on purpose: a
-/// token that is no reference only keeps an element that could have gone.
-fn collect_reference_tokens(value: &str, tokens: &mut HashSet<String>) {
-    // Fragments of the whole value: an id may contain `,` or `;`
-    // (`href="#a,b"`). Each piece is looked at once, so this stays linear.
-    for piece in value.split('#').skip(1) {
-        collect_fragment(piece, &[' ', '\t', '\r', '\n'], tokens);
-    }
-    for word in value.split(|c: char| c.is_whitespace() || matches!(c, ';' | ',')) {
-        if word.is_empty() {
-            continue;
-        }
-        for piece in word.split('#').skip(1) {
-            collect_fragment(piece, &[], tokens);
-        }
-        tokens.insert(word.to_string());
-        if let Some((before_dot, _)) = word.split_once('.') {
-            tokens.insert(before_dot.to_string());
-        }
+/// `<metadata>` or an element of a drawing program: not rendered.
+fn is_editor_element(node: Node<'_, '_>) -> bool {
+    let name = node.tag_name();
+    match name.namespace() {
+        Some(SVG_NS) => name.name() == "metadata",
+        Some(ns) => is_editor_namespace(ns),
+        None => false,
     }
 }
 
-/// The fragment at the start of `piece` (the text after a `#`), up to a
-/// closing delimiter or one of `extra_ends`, as written and decoded.
-fn collect_fragment(piece: &str, extra_ends: &[char], tokens: &mut HashSet<String>) {
-    let end = piece
-        .find(|c: char| matches!(c, ')' | '"' | '\'') || extra_ends.contains(&c))
-        .unwrap_or(piece.len());
-    let fragment = &piece[..end];
-    // Browsers decode a URL fragment: `#%61` names `a`.
-    if fragment.contains('%') {
-        tokens.insert(percent_decoded(fragment));
+/// Largest search for ids in attribute text (ids times text length). A
+/// document that needs more keeps its editor data.
+const MAX_REFERENCE_SEARCH: usize = 64 << 20;
+
+/// The ids inside editor data that occur anywhere in `reference_text`. A
+/// plain substring test, so every way a value can name an element (`#a`,
+/// `url(#a)`, `a.click`, `#a,b`, `#a)b`) counts; a false hit only keeps an
+/// element that could have gone. `None` if the search would be too large.
+fn referenced_editor_ids(doc: &Document<'_>, reference_text: &str) -> Option<HashSet<String>> {
+    let mut ids = HashSet::new();
+    let mut skip_end = 0;
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        if node.range().start < skip_end || !is_editor_element(node) {
+            continue;
+        }
+        skip_end = node.range().end;
+        for inner in node.descendants().filter(|n| n.is_element()) {
+            for attr in inner.attributes().filter(|a| a.name() == "id") {
+                ids.insert(attr.value().trim());
+            }
+        }
     }
-    tokens.insert(fragment.to_string());
+    if ids.len().saturating_mul(reference_text.len()) > MAX_REFERENCE_SEARCH {
+        return None;
+    }
+    Some(
+        ids.into_iter()
+            .filter(|id| !id.is_empty() && reference_text.contains(id))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// `text` with every `%XX` escape decoded (as UTF-8, invalid bytes replaced).
@@ -1633,9 +1647,8 @@ mod tests {
     }
 
     #[test]
-    fn reference_tokens_cover_the_ways_to_name_an_element() {
-        let mut tokens = HashSet::new();
-        for value in [
+    fn references_cover_the_ways_to_name_an_element() {
+        let values = [
             "#a",
             "url(#b)",
             "fill:url('#c');stroke:url(#d)",
@@ -1645,15 +1658,24 @@ mod tests {
             "url(#%6B)",
             "#%C3%A9%",
             "#l,m;n",
-        ] {
-            collect_reference_tokens(value, &mut tokens);
+            "#o)p",
+        ];
+        let ids = [
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "é%", "l,m;n", "o)p", "j",
+        ];
+        let attrs: String = values
+            .iter()
+            .enumerate()
+            .map(|(n, v)| format!(r#" data-{n}="{v}""#))
+            .collect();
+        let inner: String = ids.iter().map(|id| format!(r#"<g id="{id}"/>"#)).collect();
+        let svg = format!(r#"<svg xmlns="{SVG_NS}"{attrs}><metadata>{inner}</metadata></svg>"#);
+        let doc = parse(&svg).unwrap();
+        let rules = Rules::new(&doc, &svg, &OptimizeOptions::default());
+        for id in &ids[..ids.len() - 1] {
+            assert!(rules.referenced_ids.contains(*id), "{id}");
         }
-        for id in [
-            "a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "é%", "l,m;n",
-        ] {
-            assert!(tokens.contains(id), "{id}");
-        }
-        assert!(!tokens.contains("j"));
+        assert!(!rules.referenced_ids.contains("j"));
     }
 
     #[test]
