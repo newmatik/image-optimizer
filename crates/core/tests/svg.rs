@@ -508,6 +508,17 @@ fn editor_data_stays_when_removing_it_could_change_the_image() {
         let text = String::from_utf8(out.bytes).unwrap();
         assert!(text.contains("<metadata><g id=\"shape\">"), "{text}");
     }
+    // A CSS escape can spell the id: `\67` is `g`.
+    let escaped = format!(
+        r##"<svg xmlns="{SVG}" {ink} width="10" height="10"><metadata><linearGradient id="g"><stop offset="0" stop-color="red"/></linearGradient></metadata>  <rect width="10" height="10" style="fill:url(#\67) blue"/></svg>"##
+    );
+    let out = optimize(&escaped, MetadataPolicy::StripAll);
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(
+        text.contains("<metadata><linearGradient id=\"g\">"),
+        "{text}"
+    );
+
     // An id nobody names does not keep editor data alive.
     let unused = format!(
         r##"<svg xmlns="{SVG}" {ink} width="10" height="10"><metadata id="m"><g id="shape"/></metadata><use href="#other"/>{VERBOSE_PATH}</svg>"##
@@ -961,6 +972,24 @@ fn large_flat_documents_are_processed_in_linear_time() {
         format!(r#"<svg xmlns="{SVG}"><style>g{{fill:red}}</style><g>{comments}<path/></g></svg>"#);
     let out = minified(&input);
     assert!(out.contains("<!--!x--><!--!x-->"));
+
+    // A value made of reference marks.
+    let input = format!(
+        r#"<svg xmlns="{SVG}" data-x="{}">  <path/></svg>"#,
+        "#".repeat(200_000)
+    );
+    assert!(minified(&input).contains("data-x=\"####"));
+
+    // Many declarations on the root, many children that inherit them.
+    let declarations: String = (0..5_000)
+        .map(|i| format!(r#" xmlns:p{i}="urn:p{i}""#))
+        .collect();
+    let input = format!(
+        r#"<svg xmlns="{SVG}"{declarations}> {}</svg>"#,
+        "<g/>".repeat(5_000)
+    );
+    let out = minified(&input);
+    assert!(out.contains("xmlns:p4999=\"urn:p4999\"><g/><g/>"));
 
     assert!(
         started.elapsed() < std::time::Duration::from_secs(60),

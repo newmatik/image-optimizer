@@ -253,8 +253,9 @@ struct Rules<'a> {
     /// Comments may go (not under keep-all).
     strip_comments: bool,
     /// `<metadata>`, editor elements and editor attributes may go: not under
-    /// keep-all and only without a stylesheet, whose selectors (`:first-child`,
-    /// `+`, `[attr]`) could depend on them.
+    /// keep-all, only without a stylesheet, whose selectors (`:first-child`,
+    /// `+`, `[attr]`) could depend on them, and only without CSS escapes,
+    /// which could hide a reference to them.
     strip_editor_data: bool,
     /// Numbers in attributes may be rewritten: not when CSS could match or
     /// read attribute text (attribute selectors, `attr()`), or cannot be read
@@ -284,6 +285,10 @@ impl<'a> Rules<'a> {
         let mut opaque_css = has_stylesheet;
         let mut attribute_css = false;
         let mut reference_tokens = HashSet::new();
+        // A CSS escape can spell an id in a way the tokens do not show
+        // (`url(#\\67)` names `g`), so with a backslash anywhere in a value
+        // or sheet nothing that could be referenced is removed.
+        let mut escapes = false;
         for node in doc.descendants().filter(|n| n.is_element()) {
             match node.tag_name().name() {
                 "style" => {
@@ -297,6 +302,7 @@ impl<'a> Rules<'a> {
                         .to_ascii_lowercase();
                     has_stylesheet |= !is_xml_whitespace(&css);
                     // Escapes can spell anything, and an import is unseen.
+                    escapes |= css.contains('\\');
                     opaque_css |= css.contains('\\') || css.contains("@import");
                     attribute_css |= css.contains('[') || css.contains("attr(");
                 }
@@ -313,6 +319,7 @@ impl<'a> Rules<'a> {
                     attribute_css |= css.contains("attr(") || css.contains('\\');
                 }
                 if attr.name() != "id" {
+                    escapes |= value.contains('\\');
                     collect_reference_tokens(value, &mut reference_tokens);
                 }
             }
@@ -331,7 +338,7 @@ impl<'a> Rules<'a> {
         let mut rules = Rules {
             text,
             strip_comments: !keep_everything,
-            strip_editor_data: !keep_everything && !has_stylesheet,
+            strip_editor_data: !keep_everything && !has_stylesheet && !escapes,
             rewrite_numbers: !opaque_css && !attribute_css,
             lossy: opts.lossy,
             has_stylesheet,
@@ -481,10 +488,10 @@ fn collect_reference_tokens(value: &str, tokens: &mut HashSet<String>) {
         if let Some((before_dot, _)) = word.split_once('.') {
             tokens.insert(before_dot.to_string());
         }
-        for (at, _) in word.match_indices('#') {
-            let rest = &word[at + 1..];
-            let end = rest.find([')', '"', '\'']).unwrap_or(rest.len());
-            tokens.insert(rest[..end].to_string());
+        // Each piece is looked at once, so a value of many `#` stays linear.
+        for piece in word.split('#').skip(1) {
+            let end = piece.find([')', '"', '\'']).unwrap_or(piece.len());
+            tokens.insert(piece[..end].to_string());
         }
     }
 }
@@ -1173,7 +1180,7 @@ enum Event {
         depth: usize,
         namespace: Option<String>,
         name: String,
-        /// Prefix bindings in scope.
+        /// Namespace declarations written on the element.
         bindings: Vec<(Option<String>, String)>,
         attributes: Vec<AttributeEvent>,
     },
@@ -1203,7 +1210,8 @@ struct AttributeEvent {
 
 /// Flatten a document. With `rules`, leave out what the rules remove: that is
 /// the document the output has to equal.
-fn events(doc: &Document<'_>, rules: Option<&Rules<'_>>) -> Vec<Event> {
+fn events(doc: &Document<'_>, rules: Option<&Rules<'_>>) -> Option<Vec<Event>> {
+    let text = doc.input_text();
     let mut out: Vec<Event> = Vec::new();
     let mut skip_end = 0;
     for node in doc.descendants() {
@@ -1216,11 +1224,22 @@ fn events(doc: &Document<'_>, rules: Option<&Rules<'_>>) -> Vec<Event> {
                 skip_end = node.range().end;
                 continue;
             }
-            let bindings = node
-                .namespaces()
-                .filter(|ns| !rules.is_some_and(|r| r.drops_declaration(ns.name(), ns.uri())))
-                .map(|ns| (ns.name().map(str::to_string), ns.uri().to_string()))
-                .collect();
+            // The declarations written on this element. Equal declarations on
+            // every element mean equal bindings in scope everywhere, without
+            // repeating the inherited ones for each element.
+            let mut bindings = Vec::new();
+            for attr in &lex_start_tag(text, node.range().start)?.attributes {
+                let qname = text.get(attr.name.clone())?;
+                let prefix = match qname.strip_prefix("xmlns") {
+                    Some("") => None,
+                    Some(rest) => Some(rest.strip_prefix(':')?),
+                    None => continue,
+                };
+                let uri = node.lookup_namespace_uri(prefix)?;
+                if !rules.is_some_and(|r| r.drops_declaration(prefix, uri)) {
+                    bindings.push((prefix.map(str::to_string), uri.to_string()));
+                }
+            }
             let attributes = node
                 .attributes()
                 .filter(|a| !rules.is_some_and(|r| r.drops_attribute(a.namespace())))
@@ -1275,7 +1294,7 @@ fn events(doc: &Document<'_>, rules: Option<&Rules<'_>>) -> Vec<Event> {
             });
         }
     }
-    out
+    Some(out)
 }
 
 /// Check that `output` is the source document minus what the rules remove, with
@@ -1285,8 +1304,8 @@ fn verify(source: &Document<'_>, output: &str, rules: &Rules<'_>) -> Result<(), 
         return Err("nesting");
     }
     let parsed = parse(output).map_err(|_| "output is not well-formed")?;
-    let expected = events(source, Some(rules));
-    let actual = events(&parsed, None);
+    let expected = events(source, Some(rules)).ok_or("source markup")?;
+    let actual = events(&parsed, None).ok_or("output markup")?;
     if expected.len() != actual.len() {
         return Err("node count");
     }
