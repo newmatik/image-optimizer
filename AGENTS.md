@@ -69,7 +69,8 @@ pins `stable` plus clippy/rustfmt.
   10 so CI commit-back loops converge.
 * Lossy JPEG/PNG/WebP pixel-rebuilds drop metadata → only when
   `allow_lossy_rebuild()` (lossy **and** `StripAll`).
-* Animated GIF / animated WebP: skip, never flatten.
+* Animated GIF / animated WebP: skip, never flatten. Animated PNG: lossless
+  pass only, no pixel rebuild.
 * SVG: rewrite only documents made of allowlisted static elements; skip
   everything usvg would drop or freeze (text, links, script, animation,
   foreignObject, external references, `currentColor`, `var()`, dynamic CSS).

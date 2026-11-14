@@ -792,6 +792,149 @@ fn svg_with_event_handler_is_skipped() {
     assert_eq!(out.bytes, input, "skipped SVG must be returned verbatim");
 }
 
+/// A two-frame APNG built by hand: `acTL`, then per frame `fcTL` plus data.
+fn make_animated_png() -> Vec<u8> {
+    fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        // CRC-32 as PNG defines it.
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in kind.iter().chain(data) {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    0xEDB8_8320 ^ (crc >> 1)
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&(!crc).to_be_bytes());
+        out
+    }
+    fn frame_control(sequence: u32, w: u32, h: u32) -> Vec<u8> {
+        let mut d = sequence.to_be_bytes().to_vec();
+        d.extend_from_slice(&w.to_be_bytes());
+        d.extend_from_slice(&h.to_be_bytes());
+        d.extend_from_slice(&[0; 8]); // x and y offset
+        d.extend_from_slice(&[0, 1, 0, 2]); // delay 1/2 s
+        d.extend_from_slice(&[0, 0]); // dispose, blend
+        d
+    }
+
+    // Take header and image data from an ordinary PNG of noisy pixels, so the
+    // quantized still image would be clearly smaller.
+    let (w, h) = (64u32, 64u32);
+    let mut img = image::RgbaImage::new(w, h);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgba([
+            (x * 37 + y * 11) as u8,
+            (x * 5 + y * 71) as u8,
+            (x * y) as u8,
+            255,
+        ]);
+    }
+    let mut still = Vec::new();
+    {
+        use image::ImageEncoder;
+        image::codecs::png::PngEncoder::new(Cursor::new(&mut still))
+            .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+            .unwrap();
+    }
+    let ihdr = &still[8..8 + 25];
+    let idat_start = still.windows(4).position(|c| c == b"IDAT").unwrap() - 4;
+    let idat_len = u32::from_be_bytes(still[idat_start..idat_start + 4].try_into().unwrap());
+    let idat_data = &still[idat_start + 8..idat_start + 8 + idat_len as usize];
+    assert!(
+        still[idat_start + 12 + idat_len as usize + 4..].starts_with(b"IEND"),
+        "fixture expects a single IDAT chunk"
+    );
+
+    let mut out = still[..8].to_vec();
+    out.extend_from_slice(ihdr);
+    out.extend(chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]));
+    out.extend(chunk(b"fcTL", &frame_control(0, w, h)));
+    out.extend(chunk(b"IDAT", idat_data));
+    out.extend(chunk(b"fcTL", &frame_control(1, w, h)));
+    let mut second = 2u32.to_be_bytes().to_vec();
+    second.extend_from_slice(idat_data);
+    out.extend(chunk(b"fdAT", &second));
+    out.extend(chunk(b"IEND", &[]));
+    out
+}
+
+fn png_chunk_count(bytes: &[u8], kind: &[u8; 4]) -> usize {
+    bytes.windows(4).filter(|c| c == kind).count()
+}
+
+/// Neither "strip all" (which used to remove the animation chunks as if they
+/// were metadata) nor the lossy palette pass (which decodes one image) may
+/// replace an animation with its first frame.
+#[test]
+fn animated_png_keeps_its_frames_in_every_mode() {
+    let input = make_animated_png();
+    assert_eq!(png_chunk_count(&input, b"fdAT"), 1);
+
+    for (lossy, metadata) in [
+        (false, MetadataPolicy::KeepAll),
+        (false, MetadataPolicy::KeepColorProfile),
+        (false, MetadataPolicy::StripAll),
+        (true, MetadataPolicy::StripAll),
+    ] {
+        let opts = OptimizeOptions {
+            lossy,
+            metadata,
+            ..Default::default()
+        };
+        let out = optimize_bytes(&input, &opts).unwrap();
+        assert!(
+            !matches!(out.status, OptimizeStatus::Failed { .. }),
+            "{:?}",
+            out.status
+        );
+        let case = format!("lossy={lossy} {metadata:?}");
+        assert_eq!(png_chunk_count(&out.bytes, b"acTL"), 1, "{case}");
+        assert_eq!(png_chunk_count(&out.bytes, b"fcTL"), 2, "{case}");
+        assert_eq!(png_chunk_count(&out.bytes, b"fdAT"), 1, "{case}");
+    }
+}
+
+/// Keep-all means keep all: a GIF comment cannot be written back, so the file
+/// stays as it is. Other policies may drop it.
+#[test]
+fn gif_with_a_comment_is_left_alone_under_keep_all() {
+    let mut input = make_static_gif();
+    let comment = [
+        0x21, 0xFE, 9, b'c', b'o', b'p', b'y', b'r', b'i', b'g', b'h', b't', 0,
+    ];
+    // After header (6), screen descriptor (7) and the 2-color table (6).
+    input.splice(19..19, comment);
+    assert!(
+        image::load_from_memory(&input).is_ok(),
+        "fixture must decode"
+    );
+
+    let keep = OptimizeOptions {
+        metadata: MetadataPolicy::KeepAll,
+        ..Default::default()
+    };
+    let out = optimize_bytes(&input, &keep).unwrap();
+    assert!(
+        matches!(out.status, OptimizeStatus::Skipped { .. }),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(out.bytes, input);
+
+    // Without a comment keep-all still optimizes or keeps, never skips.
+    let plain = optimize_bytes(&make_static_gif(), &keep).unwrap();
+    assert!(!matches!(plain.status, OptimizeStatus::Skipped { .. }));
+
+    let default = optimize_bytes(&input, &OptimizeOptions::default()).unwrap();
+    assert!(!matches!(default.status, OptimizeStatus::Skipped { .. }));
+}
+
 #[test]
 fn corrupt_jpeg_fails_without_panicking() {
     // Valid JPEG magic bytes followed by garbage.

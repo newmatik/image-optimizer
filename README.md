@@ -141,7 +141,11 @@ message is in `error`. Skipped files do not fail `--check`; failed files do.
 Notes:
 
 * JPEG lossless is bit-for-bit on pixels (coefficients rewritten).
-* Animated GIF and animated WebP are skipped (not flattened).
+* Animated GIF and animated WebP are skipped (not flattened). An animated
+  PNG keeps its frames and is only recompressed losslessly, also with
+  `--lossy` and `--strip all`.
+* A GIF with comments or application data is skipped under `--strip none`
+  (they cannot be written back); other policies drop them.
 * WebP re-encode is from decoded pixels. If the file has an ICC profile and
   the policy is keep-color (the lossless default), it is skipped rather than
   stripping the profile. `--strip all` or `--lossy` (which defaults to strip

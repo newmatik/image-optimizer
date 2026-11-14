@@ -23,13 +23,22 @@ impl Optimizer for PngOptimizer {
 
         // Lossless pass. If this fails the input is not a valid PNG we can
         // handle, so surface the error (engine -> Failed, original untouched).
-        let lossless = oxipng::optimize_from_memory(input, &oxipng_options(opts))
+        let animated = is_animated_png(input);
+        let mut options = oxipng_options(opts);
+        // "Strip all" would remove the animation chunks with the metadata
+        // and leave the first frame. They are image data: keep them.
+        if animated && matches!(options.strip, StripChunks::All) {
+            options.strip = StripChunks::Keep(oxipng::indexset! {*b"acTL", *b"fcTL", *b"fdAT"});
+        }
+        let lossless = oxipng::optimize_from_memory(input, &options)
             .map_err(|e| Error::Encode(format!("oxipng: {e}")))?;
         out.push(lossless);
 
         // Lossy quantization rebuilds the PNG from RGBA pixels, discarding any
         // source metadata, so only offer it when the policy is to strip all.
-        if opts.allow_lossy_rebuild() {
+        // It also decodes a single image: an animated PNG would come out as
+        // its first frame only, so animation keeps the lossless pass alone.
+        if opts.allow_lossy_rebuild() && !animated {
             if let Ok(q) = quantize(input, opts) {
                 out.push(q);
             }
@@ -37,6 +46,26 @@ impl Optimizer for PngOptimizer {
 
         Ok(CandidateSet::Candidates(out))
     }
+}
+
+/// Whether a PNG is animated (APNG): it has an `acTL` chunk, which must come
+/// before the first `IDAT`.
+pub(crate) fn is_animated_png(input: &[u8]) -> bool {
+    let mut rest = input.get(8..).unwrap_or(&[]);
+    while let (Some(len), Some(kind)) = (rest.get(..4), rest.get(4..8)) {
+        match kind {
+            b"acTL" => return true,
+            b"IDAT" | b"IEND" => return false,
+            _ => {}
+        }
+        let len = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
+        // Length, type, data, CRC.
+        let Some(next) = len.checked_add(12).and_then(|n| rest.get(n..)) else {
+            return false;
+        };
+        rest = next;
+    }
+    false
 }
 
 fn oxipng_options(opts: &OptimizeOptions) -> Options {
