@@ -829,9 +829,28 @@ fn dry_run_leaves_file_untouched_inplace_writes_smaller() {
     assert!(image::load_from_memory(&std::fs::read(&path).unwrap()).is_ok());
 }
 
+/// Create a file symlink. `false` when the platform refuses: Windows needs
+/// Developer Mode or an elevated process for symlinks. GitHub's Windows runners
+/// are elevated, so there the tests must run rather than pass by skipping.
+#[cfg(any(unix, windows))]
+fn symlink_file(target: &std::path::Path, link: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    let created = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let created = std::os::windows::fs::symlink_file(target, link);
+    match created {
+        Ok(()) => true,
+        Err(e) if cfg!(windows) && std::env::var_os("GITHUB_ACTIONS").is_none() => {
+            eprintln!("skipped: cannot create a symlink here ({e})");
+            false
+        }
+        Err(e) => panic!("cannot create a symlink: {e}"),
+    }
+}
+
 /// A rename over a symlink would replace the link with a regular file and
 /// leave the real file unoptimized.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn in_place_write_follows_a_symlink_and_keeps_the_link() {
     let dir = tempfile::tempdir().unwrap();
@@ -842,7 +861,9 @@ fn in_place_write_follows_a_symlink_and_keeps_the_link() {
     let real = real_dir.join("img.png");
     let link = link_dir.join("alias.png");
     std::fs::write(&real, make_png()).unwrap();
-    std::os::unix::fs::symlink(&real, &link).unwrap();
+    if !symlink_file(&real, &link) {
+        return;
+    }
     let original_len = std::fs::metadata(&real).unwrap().len();
 
     let r = optimize_file(
@@ -869,7 +890,7 @@ fn in_place_write_follows_a_symlink_and_keeps_the_link() {
 
 /// The directory sink replaces the entry in its root. It must not follow a
 /// symlink that already sits there and overwrite a file outside the root.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn directory_sink_does_not_write_through_an_existing_symlink() {
     let dir = tempfile::tempdir().unwrap();
@@ -880,7 +901,9 @@ fn directory_sink_does_not_write_through_an_existing_symlink() {
     let out_dir = dir.path().join("out");
     std::fs::create_dir(&out_dir).unwrap();
     let dst = out_dir.join("img.png");
-    std::os::unix::fs::symlink(&outside, &dst).unwrap();
+    if !symlink_file(&outside, &dst) {
+        return;
+    }
 
     let r = optimize_file(
         &src,
