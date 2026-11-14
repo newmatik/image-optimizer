@@ -203,9 +203,10 @@ fn content_the_minifier_does_not_understand_is_kept_as_written() {
         ),
         (
             format!(
-                r#"<svg {ns}><switch><g systemLanguage="de">{VERBOSE_PATH}</g></switch></svg>"#
+                r#"<svg {ns}><switch> <metadata/> <g systemLanguage="de">{VERBOSE_PATH}</g></switch></svg>"#
             ),
-            r#"<switch><g systemLanguage="de">"#,
+            // In a switch nothing moves: it renders its first usable child.
+            r#"<switch> <metadata/> <g systemLanguage="de">"#,
         ),
         (
             format!(
@@ -493,6 +494,26 @@ fn editor_data_stays_when_removing_it_could_change_the_image() {
     let out = assert_same_image(&referenced, MetadataPolicy::StripAll);
     assert!(out.contains("<metadata><g id=\"shape\">"));
 
+    // The same with the reference written as a character reference, in a
+    // style attribute, and as an animation trigger.
+    for reference in [
+        r##"<use href="&#35;shape"/>"##,
+        r##"<rect width="1" height="1" style="fill:url( '#shape' )"/>"##,
+        r##"<set attributeName="x" to="1" begin="shape.click"/>"##,
+    ] {
+        let input = format!(
+            r##"<svg xmlns="{SVG}" {ink} width="10" height="10"><metadata><g id="shape">{VERBOSE_PATH}</g></metadata>{reference}</svg>"##
+        );
+        let out = optimize(&input, MetadataPolicy::StripAll);
+        let text = String::from_utf8(out.bytes).unwrap();
+        assert!(text.contains("<metadata><g id=\"shape\">"), "{text}");
+    }
+    // An id nobody names does not keep editor data alive.
+    let unused = format!(
+        r##"<svg xmlns="{SVG}" {ink} width="10" height="10"><metadata id="m"><g id="shape"/></metadata><use href="#other"/>{VERBOSE_PATH}</svg>"##
+    );
+    assert!(!minified(&unused).contains("metadata"));
+
     // Editor data inside text is part of the text layout.
     let in_text = format!(
         r#"<svg xmlns="{SVG}" {ink} width="10" height="10">{VERBOSE_PATH}<text>a<inkscape:x/> b</text></svg>"#
@@ -527,6 +548,25 @@ fn stylesheets_limit_what_is_rewritten() {
         "{out}"
     );
 
+    // The sheet is the text around a comment taken together, escapes can
+    // spell anything, and `attr()` reads attribute text.
+    for css in [
+        r#"@im<!--x-->port url("a.css");"#,
+        r#"@\69mport url("a.css");"#,
+        r#"rect{width:attr(width px)}"#,
+        r#"rect<!--x-->[width="5.0"]{fill:red}"#,
+    ] {
+        let input = format!(
+            r#"<svg xmlns="{SVG}" width="10.0" height="10.0"><style>{css}</style>  <rect width="5.0" height="5.0"/></svg>"#
+        );
+        let out = optimize(&input, MetadataPolicy::default());
+        let text = String::from_utf8(out.bytes).unwrap();
+        assert!(
+            text.contains(r#"width="10.0""#) && text.contains(r#"<rect width="5.0""#),
+            "{css}: {text}"
+        );
+    }
+
     // A stylesheet the codec cannot read is treated the same way.
     let external = format!(
         "<?xml-stylesheet href=\"a.css\"?>\n<svg xmlns=\"{SVG}\" width=\"10.0\" height=\"10.0\">  <metadata/><rect width=\"5.0\" height=\"5.0\"/></svg>"
@@ -544,6 +584,10 @@ fn scripted_and_unreadable_documents_are_skipped() {
         format!(r#"<svg xmlns="{SVG}">  <script>alert(1)</script></svg>"#),
         format!(r#"<svg xmlns="{SVG}">  <rect width="10.0" height="10.0" onfocus="steal()"/></svg>"#),
         format!(r#"<svg xmlns="{SVG}">  <a href=" JavaScript:alert(1)"><rect width="1.0" height="1.0"/></a></svg>"#),
+        format!(r#"<svg xmlns="{SVG}">  <a href="java&#10;script:alert(1)"><rect width="1.0" height="1.0"/></a></svg>"#),
+        format!(
+            r#"<svg xmlns="{SVG}">  <foreignObject><iframe xmlns="http://www.w3.org/1999/xhtml" src="a.html"/></foreignObject></svg>"#
+        ),
         format!(
             r#"<svg xmlns="{SVG}" xmlns:h="http://www.w3.org/1999/xhtml">  {VERBOSE_PATH}<h:script>alert(1)</h:script></svg>"#
         ),
@@ -797,15 +841,26 @@ fn lossy_rounding_moves_no_point_by_more_than_the_tolerance() {
         let (before, after) = (numbers(&geometry(&input)), numbers(&geometry(&text)));
         assert_eq!(before.len(), after.len(), "round {round}: {d}\n→ {text}");
         for (a, b) in before.iter().zip(&after) {
-            // Control points of converted curves are sums of a few inputs.
+            // 0.0005 per coordinate, plus usvg's single-precision output.
             assert!(
-                (a - b).abs() <= 0.004,
+                (a - b).abs() <= 0.0007,
                 "round {round}: {a} vs {b}\n{d}\n→ {text}"
             );
         }
         rounded += usize::from(text.contains("1.235 2.346 3.457 4.568"));
     }
     assert_eq!(rounded, 300, "every polyline is rounded");
+
+    // The root sets the scale of the image: its size is not rounded.
+    let root = format!(
+        r#"<svg xmlns="{SVG}" width="10.12345" height="10.12345" x="0.00049">  <rect width="1.23456" height="1"/></svg>"#
+    );
+    let out = optimize_bytes(root.as_bytes(), &opts).unwrap();
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(
+        text.contains(r#"width="10.12345" height="10.12345" x=".00049"><rect width="1.235""#),
+        "{text}"
+    );
 
     // An arc is sensitive to its end points: such a path keeps every digit.
     let arc = format!(
@@ -833,7 +888,7 @@ fn mutated_documents_never_panic_or_change_meaning() {
 </svg>
 "##
     );
-    let alphabet: Vec<char> = "<>/\"'= .,-+e01aMzL&;!?[]:x\n".chars().collect();
+    let alphabet: Vec<char> = "<>/\"'= .,-+e01aMzL&;!?[]:x\n中\\#".chars().collect();
     let mut rng = Lcg(42);
     for _ in 0..4_000 {
         let mut chars: Vec<char> = base.chars().collect();
@@ -866,4 +921,50 @@ fn mutated_documents_never_panic_or_change_meaning() {
             }
         }
     }
+}
+
+#[test]
+fn odd_but_valid_markup_is_handled() {
+    // Non-ASCII names and values.
+    let unicode =
+        format!(r#"<svg xmlns="{SVG}" 中="1" ön="x">  {VERBOSE_PATH}<text>Größe 中</text></svg>"#);
+    let out = assert_same_image(&unicode, MetadataPolicy::default());
+    assert!(out.contains(r#"中="1" ön="x""#), "{out}");
+
+    // Hundreds of padding zeros: left exactly as written (see MAX_DIGITS).
+    let padded = format!(
+        r#"<svg xmlns="{SVG}" viewBox="0 0 24 24">  <path d="M{}10 0L20.0 20L0 20Z"/></svg>"#,
+        "0".repeat(400)
+    );
+    let out = minified(&padded);
+    assert!(out.contains(&format!("{}10 0L20.0 20L0 20Z", "0".repeat(400))));
+}
+
+/// Work must grow with the size of the file, not with its square.
+#[test]
+fn large_flat_documents_are_processed_in_linear_time() {
+    let started = std::time::Instant::now();
+
+    let metadata: String = (0..40_000)
+        .map(|i| format!(r#"<metadata id="a{i}"/>"#))
+        .collect();
+    let input = format!(r##"<svg xmlns="{SVG}"><use href="#a7"/>{metadata}</svg>"##);
+    let out = minified(&input);
+    assert_eq!(
+        out.matches("<metadata").count(),
+        1,
+        "only the referenced one stays"
+    );
+
+    let comments = "<!--!x--> \n".repeat(40_000);
+    let input =
+        format!(r#"<svg xmlns="{SVG}"><style>g{{fill:red}}</style><g>{comments}<path/></g></svg>"#);
+    let out = minified(&input);
+    assert!(out.contains("<!--!x--><!--!x-->"));
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "took {:?}",
+        started.elapsed()
+    );
 }

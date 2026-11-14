@@ -77,8 +77,8 @@ pins `stable` plus clippy/rustfmt.
   `verify` (output parsed again and compared with the source minus exactly
   those removals), otherwise the file is `skipped`. Skip documents with
   scripting or entities. Text, `<title>`/`<desc>`/`aria-*`, the root size and
-  `viewBox` are never touched. Lossy rounding must not accumulate along a path
-  and leaves arcs alone.
+  `viewBox` are never removed or rounded. Lossy rounding must not accumulate
+  along a path and leaves arcs, smooth curves and the root element alone.
 * AVIF: detect, skip, no optimizer yet.
 * `optimize_paths` preserves input order. `--max-in-flight-mb` is a byte
   semaphore on on-disk size; a file larger than the budget still runs alone.

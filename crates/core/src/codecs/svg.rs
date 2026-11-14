@@ -52,9 +52,10 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 /// 96 nested groups.
 const MAX_STRUCTURE_DEPTH: usize = 64;
 
-/// SVG elements that render no character data of their own. Whitespace between
-/// their children is not part of the image. Filter primitives (`fe*`) are
-/// matched by prefix.
+/// SVG elements that render no character data of their own. Whitespace and
+/// non-rendered elements between their children are not part of the image.
+/// Filter primitives (`fe*`) are matched by prefix. `<switch>` is not in the
+/// list: it renders its first usable child, so removing a child changes which.
 const INERT_CONTAINERS: &[&str] = &[
     "svg",
     "g",
@@ -67,7 +68,6 @@ const INERT_CONTAINERS: &[&str] = &[
     "linearGradient",
     "radialGradient",
     "filter",
-    "switch",
     "a",
     "path",
     "rect",
@@ -135,9 +135,6 @@ const NUMERIC_ATTRIBUTES: &[&str] = &[
 /// coordinate may end up from its exact position.
 const LOSSY_DECIMALS: usize = 3;
 const LOSSY_TOLERANCE: f64 = 0.0005 + 1e-7;
-
-/// A subtree with more ids than this is not searched for references and stays.
-const MAX_IDS_IN_REMOVED_SUBTREE: usize = 64;
 
 impl Optimizer for SvgOptimizer {
     fn candidates(&self, input: &[u8], opts: &OptimizeOptions) -> Result<CandidateSet, Error> {
@@ -217,18 +214,32 @@ fn is_xml_whitespace(s: &str) -> bool {
     s.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
 }
 
-/// A `<script>` in any namespace, an `on*` attribute or a `javascript:` value.
+/// Elements that run script or load a document that can reach into this one.
+const ACTIVE_ELEMENTS: &[&str] = &["script", "iframe", "frame", "object", "embed", "handler"];
+
+/// Anything that can run script and so observe the markup: an active element
+/// in any namespace, an `on*` attribute, or a `javascript:` URL in any
+/// attribute value (URL parsers drop whitespace and control characters, so
+/// those are ignored here).
 fn has_scripting(doc: &Document<'_>) -> bool {
     doc.descendants().filter(|n| n.is_element()).any(|node| {
-        node.tag_name().name().eq_ignore_ascii_case("script")
+        let name = node.tag_name().name();
+        ACTIVE_ELEMENTS.iter().any(|e| name.eq_ignore_ascii_case(e))
             || node.attributes().any(|attr| {
-                let name = attr.name();
-                let handler = name.len() > 2 && name[..2].eq_ignore_ascii_case("on");
-                let value = attr.value().trim_start();
-                let script_url = value
-                    .get(..11)
-                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("javascript:"));
-                handler || script_url
+                let handler = attr.name().len() > 2
+                    && attr
+                        .name()
+                        .get(..2)
+                        .is_some_and(|on| on.eq_ignore_ascii_case("on"));
+                handler || {
+                    let compact: String = attr
+                        .value()
+                        .chars()
+                        .filter(|c| *c > ' ')
+                        .map(|c| c.to_ascii_lowercase())
+                        .collect();
+                    compact.contains("javascript:")
+                }
             })
     })
 }
@@ -245,8 +256,9 @@ struct Rules<'a> {
     /// keep-all and only without a stylesheet, whose selectors (`:first-child`,
     /// `+`, `[attr]`) could depend on them.
     strip_editor_data: bool,
-    /// Numbers in attributes may be rewritten: not when a stylesheet could
-    /// match attribute text.
+    /// Numbers in attributes may be rewritten: not when CSS could match or
+    /// read attribute text (attribute selectors, `attr()`), or cannot be read
+    /// here (imports, escapes, external sheets).
     rewrite_numbers: bool,
     /// Coordinates may be rounded.
     lossy: bool,
@@ -255,6 +267,11 @@ struct Rules<'a> {
     has_stylesheet: bool,
     /// Namespaces still used by an element or attribute after the removals.
     used_namespaces: HashSet<String>,
+    /// Every name an attribute value could use to point at an element.
+    reference_tokens: HashSet<String>,
+    /// Elements that have a child element (only filled with a stylesheet).
+    parents_of_elements: HashSet<roxmltree::NodeId>,
+    root: roxmltree::NodeId,
 }
 
 impl<'a> Rules<'a> {
@@ -265,15 +282,23 @@ impl<'a> Rules<'a> {
             .any(|n| n.pi().is_some_and(|pi| pi.target == "xml-stylesheet"));
         // A stylesheet this codec cannot read: assume it matches anything.
         let mut opaque_css = has_stylesheet;
-        let mut attribute_selectors = false;
+        let mut attribute_css = false;
+        let mut reference_tokens = HashSet::new();
         for node in doc.descendants().filter(|n| n.is_element()) {
             match node.tag_name().name() {
                 "style" => {
-                    for css in node.children().filter_map(|c| c.text()) {
-                        has_stylesheet |= !is_xml_whitespace(css);
-                        attribute_selectors |= css.contains('[');
-                        opaque_css |= css.to_ascii_lowercase().contains("@import");
-                    }
+                    // The sheet is the text of all children together: a comment
+                    // in the middle does not split a rule for the CSS parser.
+                    let css: String = node
+                        .children()
+                        .filter(|c| c.is_text())
+                        .filter_map(|c| c.text())
+                        .collect::<String>()
+                        .to_ascii_lowercase();
+                    has_stylesheet |= !is_xml_whitespace(&css);
+                    // Escapes can spell anything, and an import is unseen.
+                    opaque_css |= css.contains('\\') || css.contains("@import");
+                    attribute_css |= css.contains('[') || css.contains("attr(");
                 }
                 "link" => {
                     has_stylesheet = true;
@@ -281,17 +306,39 @@ impl<'a> Rules<'a> {
                 }
                 _ => {}
             }
+            for attr in node.attributes() {
+                let value = attr.value();
+                if attr.name() == "style" {
+                    let css = value.to_ascii_lowercase();
+                    attribute_css |= css.contains("attr(") || css.contains('\\');
+                }
+                if attr.name() != "id" {
+                    collect_reference_tokens(value, &mut reference_tokens);
+                }
+            }
         }
+        let parents_of_elements = if has_stylesheet {
+            doc.descendants()
+                .filter(|n| n.is_element())
+                .filter_map(|n| n.parent())
+                .map(|p| p.id())
+                .collect()
+        } else {
+            HashSet::new()
+        };
 
         let keep_everything = keep_all(opts.metadata);
         let mut rules = Rules {
             text,
             strip_comments: !keep_everything,
             strip_editor_data: !keep_everything && !has_stylesheet,
-            rewrite_numbers: !opaque_css && !attribute_selectors,
+            rewrite_numbers: !opaque_css && !attribute_css,
             lossy: opts.lossy,
             has_stylesheet,
             used_namespaces: HashSet::new(),
+            reference_tokens,
+            parents_of_elements,
+            root: doc.root_element().id(),
         };
 
         let mut used = HashSet::new();
@@ -348,7 +395,7 @@ impl<'a> Rules<'a> {
             && !raw.is_empty()
             && is_xml_whitespace(raw)
             && self.inert_context(parent)
-            && (!self.has_stylesheet || parent.children().any(|c| c.is_element()))
+            && (!self.has_stylesheet || self.parents_of_elements.contains(&parent.id()))
     }
 
     fn drops_comment(&self, node: Node<'_, '_>) -> bool {
@@ -373,18 +420,11 @@ impl<'a> Rules<'a> {
 
     /// Whether anything in the document could point at an id inside `node`.
     fn subtree_is_referenced(&self, node: Node<'_, '_>) -> bool {
-        let mut ids = 0;
-        for element in node.descendants().filter(|n| n.is_element()) {
-            for attr in element.attributes().filter(|a| a.name() == "id") {
-                ids += 1;
-                if ids > MAX_IDS_IN_REMOVED_SUBTREE
-                    || self.text.contains(&format!("#{}", attr.value()))
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        node.descendants()
+            .filter(|n| n.is_element())
+            .flat_map(|n| n.attributes())
+            .filter(|a| a.name() == "id")
+            .any(|a| self.reference_tokens.contains(a.value().trim()))
     }
 
     fn drops_attribute(&self, namespace: Option<&str>) -> bool {
@@ -401,30 +441,63 @@ impl<'a> Rules<'a> {
     }
 
     /// How the value of `attribute` on `element` is a number, if it may be
-    /// rewritten.
-    fn number_kind(
+    /// rewritten, and whether it may also be rounded. The root element is
+    /// never rounded: its size and `viewBox` set the scale of everything else.
+    fn number_rule(
         &self,
         element: Node<'_, '_>,
         attr_ns: Option<&str>,
         attr: &str,
-    ) -> Option<NumberKind> {
+    ) -> Option<NumberRule> {
         if !self.rewrite_numbers
             || attr_ns.is_some()
             || element.tag_name().namespace() != Some(SVG_NS)
         {
             return None;
         }
-        match (element.tag_name().name(), attr) {
-            ("path", "d") => Some(NumberKind::Path),
-            ("polygon" | "polyline", "points") => Some(NumberKind::List),
-            (_, name) if NUMERIC_ATTRIBUTES.contains(&name) => Some(NumberKind::Single),
-            _ => None,
+        let kind = match (element.tag_name().name(), attr) {
+            ("path", "d") => NumberKind::Path,
+            ("polygon" | "polyline", "points") => NumberKind::List,
+            (_, name) if NUMERIC_ATTRIBUTES.contains(&name) => NumberKind::Single,
+            _ => return None,
+        };
+        Some(NumberRule {
+            kind,
+            round: self.lossy && element.id() != self.root,
+        })
+    }
+}
+
+/// Collect what a decoded attribute value could name: each word, each word up
+/// to a `.` (`begin="id.click"`), and everything after a `#` up to a closing
+/// delimiter (`#id`, `url(#id)`, `other.svg#id`). Generous on purpose: a
+/// token that is no reference only keeps an element that could have gone.
+fn collect_reference_tokens(value: &str, tokens: &mut HashSet<String>) {
+    for word in value.split(|c: char| c.is_whitespace() || matches!(c, ';' | ',')) {
+        if word.is_empty() {
+            continue;
+        }
+        tokens.insert(word.to_string());
+        if let Some((before_dot, _)) = word.split_once('.') {
+            tokens.insert(before_dot.to_string());
+        }
+        for (at, _) in word.match_indices('#') {
+            let rest = &word[at + 1..];
+            let end = rest.find([')', '"', '\'']).unwrap_or(rest.len());
+            tokens.insert(rest[..end].to_string());
         }
     }
 }
 
 fn is_editor_namespace(uri: &str) -> bool {
     EDITOR_NAMESPACES.contains(&uri) || EDITOR_NAMESPACE_PREFIXES.iter().any(|p| uri.starts_with(p))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NumberRule {
+    kind: NumberKind,
+    /// Coordinates may be rounded to [`LOSSY_DECIMALS`].
+    round: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -622,8 +695,8 @@ fn rebuild_start_tag(
             }
             // A reference in the value would not survive a rewrite as written.
             if !raw.contains('&') {
-                if let Some(kind) = rules.number_kind(node, namespace, local) {
-                    value = minify_number_value(kind, raw, rules.lossy);
+                if let Some(rule) = rules.number_rule(node, namespace, local) {
+                    value = minify_number_value(rule.kind, raw, rule.round);
                 }
             }
         }
@@ -677,6 +750,21 @@ fn number_end(b: &[u8], mut i: usize) -> Option<usize> {
         }
     }
     Some(i)
+}
+
+/// Longest run of integer or fraction digits in a number that is rewritten.
+/// Up to here every reader computes the same value with and without padding
+/// zeros; a parser that scales digit by digit can overflow on hundreds of
+/// them, and then the padded spelling is a different (invalid) number.
+const MAX_DIGITS: usize = 12;
+
+/// Whether `number` is spelled with at most [`MAX_DIGITS`] integer and
+/// fraction digits. Only such numbers are respelled.
+fn is_ordinary(number: &str) -> bool {
+    let digits = number.trim_start_matches(['+', '-']);
+    let mantissa = digits.split(['e', 'E']).next().unwrap_or(digits);
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    int.len() <= MAX_DIGITS && frac.len() <= MAX_DIGITS
 }
 
 /// The shortest spelling of the same decimal number: no `+`, no leading or
@@ -736,6 +824,12 @@ fn minify_number_value(kind: NumberKind, raw: &str, lossy: bool) -> Option<Strin
     match kind {
         NumberKind::Path => {
             let segments = parse_path(raw)?;
+            if !segments
+                .iter()
+                .all(|s| s.args.iter().all(|a| is_ordinary(a)))
+            {
+                return None;
+            }
             let lossless = || segments.iter().map(|s| s.shortened()).collect::<Vec<_>>();
             let args = if lossy {
                 round_path(&segments).unwrap_or_else(lossless)
@@ -746,6 +840,9 @@ fn minify_number_value(kind: NumberKind, raw: &str, lossy: bool) -> Option<Strin
         }
         NumberKind::List => {
             let numbers = parse_number_list(raw)?;
+            if !numbers.iter().all(|n| is_ordinary(n)) {
+                return None;
+            }
             let mut out = String::with_capacity(raw.len());
             for (i, number) in numbers.iter().enumerate() {
                 push_number(&mut out, &round_or_shorten(number, lossy), i > 0);
@@ -754,6 +851,9 @@ fn minify_number_value(kind: NumberKind, raw: &str, lossy: bool) -> Option<Strin
         }
         NumberKind::Single => {
             let (number, unit) = split_unit(raw)?;
+            if !is_ordinary(number) {
+                return None;
+            }
             // Rounding in another unit would not be a rounding in user units.
             let lossy = lossy && matches!(unit, "" | "px");
             Some(format!("{}{unit}", round_or_shorten(number, lossy)))
@@ -933,7 +1033,8 @@ fn write_path(segments: &[Segment<'_>], args: &[Vec<String>]) -> String {
 /// Walk a path and call `point(segment index, argument index, axis, exact
 /// absolute coordinate, relative?)` for every coordinate; the return value is
 /// the absolute coordinate as it will be read back. Tracks the current point
-/// both exactly and as read back. `None` for arcs or unreadable numbers.
+/// both exactly and as read back. `None` for arcs, smooth curves or
+/// unreadable numbers: such paths are not rounded.
 fn walk_path(
     segments: &[Segment<'_>],
     mut point: impl FnMut(usize, usize, usize, f64, f64, bool) -> Option<f64>,
@@ -949,7 +1050,10 @@ fn walk_path(
                 (exact, read) = start;
                 continue;
             }
-            b'A' => return None,
+            // An arc can move far when its end points move a little, and a
+            // smooth curve mirrors the previous control point, which doubles
+            // its error from one segment to the next.
+            b'A' | b'S' | b'T' => return None,
             _ => {}
         }
         let (mut exact_end, mut read_end) = (exact, read);
@@ -976,8 +1080,8 @@ fn walk_path(
 
 /// Round every coordinate of a path to [`LOSSY_DECIMALS`]. A relative
 /// coordinate is rounded against the current point as it will be read back, so
-/// the error of one segment is not carried into the next. Paths with arcs are
-/// not rounded: an arc can move far when its end points move a little.
+/// the error of one segment is not carried into the next. Paths with arcs or
+/// smooth curves (`S`, `T`) are not rounded at all.
 fn round_path(segments: &[Segment<'_>]) -> Option<Vec<Vec<String>>> {
     let mut out: Vec<Vec<String>> = segments
         .iter()
@@ -1009,7 +1113,9 @@ fn absolute_coordinates(segments: &[Segment<'_>]) -> Option<Vec<f64>> {
 /// the same decimals exactly, or, with `lossy`, positions within the rounding
 /// tolerance.
 fn same_numbers(kind: NumberKind, source: &str, output: &str, lossy: bool) -> bool {
-    let same = |a: &str, b: &str| shorten(a) == shorten(b);
+    // Identical, or two ordinary spellings of one decimal number.
+    let same =
+        |a: &str, b: &str| a == b || (is_ordinary(a) && is_ordinary(b) && shorten(a) == shorten(b));
     let close = |a: &str, b: &str| {
         lossy
             && matches!((parse_finite(a), parse_finite(b)),
@@ -1092,7 +1198,7 @@ struct AttributeEvent {
     name: String,
     value: String,
     /// Set on source attributes whose number may have been rewritten.
-    kind: Option<NumberKind>,
+    rule: Option<NumberRule>,
 }
 
 /// Flatten a document. With `rules`, leave out what the rules remove: that is
@@ -1122,7 +1228,7 @@ fn events(doc: &Document<'_>, rules: Option<&Rules<'_>>) -> Vec<Event> {
                     namespace: a.namespace().map(str::to_string),
                     name: a.name().to_string(),
                     value: a.value().to_string(),
-                    kind: rules.and_then(|r| r.number_kind(node, a.namespace(), a.name())),
+                    rule: rules.and_then(|r| r.number_rule(node, a.namespace(), a.name())),
                 })
                 .collect();
             out.push(Event::Element {
@@ -1216,8 +1322,8 @@ fn verify(source: &Document<'_>, output: &str, rules: &Rules<'_>) -> Result<(), 
                         return Err("attribute name");
                     }
                     let equal = a.value == b.value
-                        || a.kind.is_some_and(|kind| {
-                            same_numbers(kind, &a.value, &b.value, rules.lossy)
+                        || a.rule.is_some_and(|rule| {
+                            same_numbers(rule.kind, &a.value, &b.value, rule.round)
                         });
                     if !equal {
                         return Err("attribute value");
@@ -1337,6 +1443,64 @@ mod tests {
     }
 
     #[test]
+    fn only_ordinary_spellings_are_rewritten() {
+        assert!(is_ordinary("-000123.456000"));
+        assert!(is_ordinary("+1.5e-3"));
+        assert!(!is_ordinary(&format!("{}1", "0".repeat(13))));
+        assert!(!is_ordinary(&format!("1.{}", "0".repeat(13))));
+
+        // Hundreds of padding zeros overflow some number parsers: the padded
+        // number is then invalid, the short one is not.
+        let padded = format!("M{}10 0L20.0 20L0 20Z", "0".repeat(400));
+        assert_eq!(path(&padded, false), None);
+        let short = "M10 0L20 20L0 20Z";
+        assert!(!same_numbers(NumberKind::Path, &padded, short, false));
+        assert!(same_numbers(NumberKind::Path, &padded, &padded, false));
+        let list = format!("1.{}", "0".repeat(40));
+        assert_eq!(minify_number_value(NumberKind::List, &list, false), None);
+        assert_eq!(minify_number_value(NumberKind::Single, &list, true), None);
+    }
+
+    #[test]
+    fn scripting_is_recognized_in_every_spelling() {
+        let scripted = |body: &str| {
+            let text = format!(r#"<svg xmlns="{SVG_NS}" xmlns:h="urn:h">{body}</svg>"#);
+            has_scripting(&parse(&text).unwrap())
+        };
+        assert!(scripted("<script/>"));
+        assert!(scripted("<h:Script/>"));
+        assert!(scripted(
+            "<foreignObject><h:iframe src='a.html'/></foreignObject>"
+        ));
+        assert!(scripted("<g onClick='x()'/>"));
+        assert!(scripted("<a href='javascript:x()'/>"));
+        assert!(scripted("<a href=' Java&#10;Script&#9;:x()'/>"));
+        assert!(scripted("<set attributeName='href' to='javascript:x()'/>"));
+        assert!(!scripted("<g on='x' id='online'/>"));
+        // Multibyte attribute names must not be sliced inside a character.
+        assert!(!scripted("<g 中='1' ön='2'/>"));
+    }
+
+    #[test]
+    fn reference_tokens_cover_the_ways_to_name_an_element() {
+        let mut tokens = HashSet::new();
+        for value in [
+            "#a",
+            "url(#b)",
+            "fill:url('#c');stroke:url(#d)",
+            "other.svg#e",
+            "f.click+1s;g.end",
+            "h i",
+        ] {
+            collect_reference_tokens(value, &mut tokens);
+        }
+        for id in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
+            assert!(tokens.contains(id), "{id}");
+        }
+        assert!(!tokens.contains("j"));
+    }
+
+    #[test]
     fn number_lexer_follows_the_svg_grammar() {
         let end = |s: &str| number_end(s.as_bytes(), 0);
         assert_eq!(end("12.5,3"), Some(4));
@@ -1411,14 +1575,21 @@ mod tests {
         assert!(same_numbers(NumberKind::Path, &data, &out, true));
         assert!(!same_numbers(NumberKind::Path, &data, &out, false));
 
-        // Every command kind, relative and absolute, with closepath resets.
+        // Lines and curves, relative and absolute, with closepath resets.
         let data = "M1.23456 2.34567l3.33333 4.44444h5.55555v-6.66666H9.87654V1.23456\
-                    c1.11111 2.22222 3.33333 4.44444 5.55555 6.66666s1.11111 2.22222 3.33333 4.44444\
-                    q1.11111 2.22222 3.33333 4.44444t5.55555 6.66666zm1.11111 1.11111L5.55555 6.66666z";
+                    c1.11111 2.22222 3.33333 4.44444 5.55555 6.66666\
+                    q1.11111 2.22222 3.33333 4.44444zm1.11111 1.11111L5.55555 6.66666z";
         let out = path(data, true).unwrap();
         assert!(out.len() < data.len());
         assert!(same_numbers(NumberKind::Path, data, &out, true), "{out}");
         assert_eq!(path(&out, true).unwrap(), out, "rounding is idempotent");
+
+        // A smooth curve mirrors the previous control point, so its error
+        // would double from segment to segment: such paths keep every digit.
+        let smooth = "M0 0Q1 0 2 .00049T4-.00049 6 .00049 8-.00049";
+        assert_eq!(path(smooth, true).unwrap(), smooth);
+        let smooth = "M0 0C1 1 2 2 3.00049 3S5 5 6.00049 6";
+        assert_eq!(path(smooth, true).unwrap(), smooth);
 
         // Arcs keep their exact numbers.
         assert_eq!(

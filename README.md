@@ -158,12 +158,15 @@ Notes:
   numbers that are numerically equal. If it does not, the file is reported as
   `skipped`.
 * Whitespace is only removed where SVG renders none (not inside `<text>`,
-  `<style>`, `<foreignObject>` or under `xml:space`). A comment that starts
+  `<style>`, `<foreignObject>`, `<switch>` or under `xml:space`). A comment that starts
   with `<!--!` (licence notice) is kept. With `--strip none`, comments and
   editor data stay. In a file with a `<style>` sheet, editor data stays and,
-  if the sheet has attribute selectors, numbers stay as written.
-* SVGs are skipped, untouched, when they contain a `<script>`, `on*=` handlers
-  or `javascript:` links (a script can read the markup), declare entities,
+  if CSS can see attribute text (attribute selectors, `attr()`, imports,
+  escapes), numbers stay as written. Numbers padded with more than 12 digits
+  stay as written too.
+* SVGs are skipped, untouched, when they contain a `<script>`, an embedded
+  frame or object, `on*=` handlers or `javascript:` URLs (a script can read
+  the markup), declare entities,
   are not UTF-8, have a root that is not an SVG `<svg>`, or nest elements
   deeper than 64 levels. A file that is not well-formed XML is reported as
   `failed`.
@@ -171,7 +174,8 @@ Notes:
   value or element position, from outside the file.
 * `--lossy` also rounds coordinates to 3 decimals, in the units of the file
   (`viewBox`). Error does not add up along a path; no point moves by more than
-  0.0005 units. Paths with arcs keep all digits. Hairlines that are exactly
+  0.0005 units. Paths with arcs or smooth curves (`S`, `T`) and the root
+  element (size, `viewBox`) keep all digits. Hairlines that are exactly
   diagonal can change their antialiasing slightly.
 * AVIF is detected and skipped until an optimizer exists.
 * Lossy JPEG/PNG/WebP rebuilds drop metadata, so they only run when the
