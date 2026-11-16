@@ -31,7 +31,7 @@ gif = "0.14"
 # own output.
 roxmltree = "0.21"
 # Tests only: an independent SVG reader to compare source and output geometry.
-usvg = "0.49"
+usvg = "0.50"
 
 # --- engine support ---
 rayon = "1"
