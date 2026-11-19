@@ -15,7 +15,10 @@ env:
 jobs:
   test:
     name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    # The matrix values are only labels (they name the required checks): Linux runs on Beast (LINUX_RUNNER),
+    # Windows on beast-windows (WINDOWS_RUNNER), macOS on the self-hosted Mac (MACOS_RUNNER). No GitHub-hosted
+    # runners (Actions budget $0).
+    runs-on: ${{ matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.os == 'macos-latest' && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,7 +61,7 @@ jobs:
 
   msrv:
     name: MSRV
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,7 +82,7 @@ jobs:
 
   supply-chain:
     name: Supply Chain
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -105,7 +108,7 @@ jobs:
 
   coverage:
     name: Coverage
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:
