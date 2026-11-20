@@ -124,7 +124,7 @@ jobs:
           name: imageopt-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 5
 
   publish:
     name: Publish release
@@ -137,11 +137,26 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # A rerun of only this job after the build artifacts expired downloads nothing:
+      # fail instead of publishing a release without binaries. Keep the 5 in step with the build matrix.
+      - name: Check all packages are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          archives=$(find dist -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)
+          sums=$(find dist -maxdepth 1 -name '*.sha256' | wc -l)
+          if [ "$archives" -ne 5 ] || [ "$sums" -ne 5 ]; then
+            echo "::error::Expected 5 archives and 5 checksums, found $archives and $sums. Re-run all jobs."
+            exit 1
+          fi
+
       - name: Upload to release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
             dist/*.zip
