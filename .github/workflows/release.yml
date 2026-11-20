@@ -22,21 +22,20 @@ env:
 jobs:
   build:
     name: ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    # Every target builds on Newmatik's own runners: Linux x64 on Beast (LINUX_RUNNER), Windows on beast-windows
+    # (WINDOWS_RUNNER), Apple Silicon on the self-hosted Mac (MACOS_RUNNER). No GitHub-hosted runners (Actions
+    # budget $0). There is no Intel Mac and no Linux arm64 runner: x86_64-apple-darwin builds only when the
+    # variable MACOS_INTEL_RUNNER names an Intel Mac runner label, aarch64-unknown-linux-gnu only when
+    # LINUX_ARM_RUNNER names a Linux arm64 runner label. Without them the release ships neither binary.
+    runs-on: ${{ matrix.os == 'macos-15-intel' && vars.MACOS_INTEL_RUNNER || matrix.os == 'ubuntu-24.04-arm' && vars.LINUX_ARM_RUNNER || matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'beast-windows') || startsWith(matrix.os, 'macos-') && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+        include: >-
+          ${{ fromJSON(format('[{0}{1}{2}]',
+          '{"os":"macos-14","target":"aarch64-apple-darwin"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}',
+          vars.MACOS_INTEL_RUNNER && ',{"os":"macos-15-intel","target":"x86_64-apple-darwin"}' || '',
+          vars.LINUX_ARM_RUNNER && ',{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}' || '')) }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -78,11 +77,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install nasm
 
+      # GitHub's Windows images ship Chocolatey; the self-hosted beast-windows VM does not.
       - name: Install nasm (Windows)
         if: runner.os == 'Windows'
-        run: |
-          choco install nasm -y
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -129,7 +127,7 @@ jobs:
   publish:
     name: Publish release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - name: Download packaged artifacts
         uses: actions/download-artifact@v8

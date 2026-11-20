@@ -15,7 +15,10 @@ env:
 jobs:
   test:
     name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    # The matrix values are only labels (they name the required checks): Linux runs on Beast (LINUX_RUNNER),
+    # Windows on beast-windows (WINDOWS_RUNNER), macOS on the self-hosted Mac (MACOS_RUNNER). No GitHub-hosted
+    # runners (Actions budget $0).
+    runs-on: ${{ matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.os == 'macos-latest' && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
     strategy:
       fail-fast: false
       matrix:
@@ -38,11 +41,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install nasm
 
+      # GitHub's Windows images ship Chocolatey; the self-hosted beast-windows VM does not.
       - name: Install nasm (Windows)
         if: runner.os == 'Windows'
-        run: |
-          choco install nasm -y
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
 
       - uses: Swatinem/rust-cache@v2
 
@@ -58,7 +60,7 @@ jobs:
 
   msrv:
     name: MSRV
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,7 +81,7 @@ jobs:
 
   supply-chain:
     name: Supply Chain
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -105,7 +107,7 @@ jobs:
 
   coverage:
     name: Coverage
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:
