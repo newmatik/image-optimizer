@@ -15,7 +15,7 @@ env:
 jobs:
   test:
     name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ startsWith(matrix.os, 'windows') && (vars.WINDOWS_RUNNER || 'beast-windows') || startsWith(matrix.os, 'macos') && (vars.MACOS_RUNNER || 'macbook') || startsWith(matrix.os, 'ubuntu') && endsWith(matrix.os, '-arm') && (vars.LINUX_ARM_RUNNER || 'linux-arm64') || startsWith(matrix.os, 'ubuntu') && (vars.LINUX_RUNNER || 'beast') || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,7 +58,7 @@ jobs:
 
   msrv:
     name: MSRV
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,7 +79,7 @@ jobs:
 
   supply-chain:
     name: Supply Chain
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -105,7 +105,7 @@ jobs:
 
   coverage:
     name: Coverage
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
         with:

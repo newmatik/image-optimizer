@@ -22,7 +22,7 @@ env:
 jobs:
   build:
     name: ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ startsWith(matrix.os, 'windows') && (vars.WINDOWS_RUNNER || 'beast-windows') || startsWith(matrix.os, 'macos') && (vars.MACOS_RUNNER || 'macbook') || startsWith(matrix.os, 'ubuntu') && endsWith(matrix.os, '-arm') && (vars.LINUX_ARM_RUNNER || 'linux-arm64') || startsWith(matrix.os, 'ubuntu') && (vars.LINUX_RUNNER || 'beast') || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -129,7 +129,7 @@ jobs:
   publish:
     name: Publish release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - name: Download packaged artifacts
         uses: actions/download-artifact@v8
