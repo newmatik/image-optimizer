@@ -144,8 +144,9 @@ run no job. The matrix checks (`ubuntu-latest`, `macos-latest`,
 merge as is: a maintainer pushes its commits to a branch here to run CI. Keep
 those checks required, or fork PRs could merge with CI skipped. Both macOS
 targets build on the arm64 Mac: `x86_64-apple-darwin` is cross-compiled and
-not tested on an Intel Mac. `aarch64-unknown-linux-gnu` is built only while the variable `LINUX_ARM_RUNNER` names an arm64 Linux
-runner; without it a release has no Linux arm64 binary.
+not tested on an Intel Mac. `aarch64-unknown-linux-gnu` is built only while
+the variable `LINUX_ARM_RUNNER` names an arm64 Linux runner; without it a
+release has no Linux arm64 binary.
 
 After a release, update the `uses: newmatik/image-optimizer@vX.Y.Z` examples in
 the README and the `released` job in `action-smoke.yml` to the new tag (add a
