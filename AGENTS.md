@@ -137,9 +137,16 @@ Tag `vX.Y.Z` must match workspace `version`. `release.yml` builds the matrix,
 checksums, then one publish job. Composite action verifies `*.sha256` before
 exec.
 
+Every job runs on our own runners (`vars.LINUX_RUNNER`, `vars.MACOS_RUNNER`,
+`vars.WINDOWS_RUNNER`), never GitHub-hosted ones, and pull requests from forks
+run no job. Both macOS targets build on the arm64 Mac: `x86_64-apple-darwin`
+is cross-compiled and not tested on an Intel Mac. `aarch64-unknown-linux-gnu`
+is built only while the variable `LINUX_ARM_RUNNER` names an arm64 Linux
+runner; without it a release has no Linux arm64 binary.
+
 After a release, update the `uses: newmatik/image-optimizer@vX.Y.Z` examples in
-the README and the `released` job in `action-smoke.yml` to the new tag (add
-`windows-latest` to that job from v0.3.0 on), and drop the note about what the
+the README and the `released` job in `action-smoke.yml` to the new tag (add a
+`runner: windows`, `name: Windows` row to that job from v0.3.0 on), and drop the note about what the
 previous tag's wrapper lacks. Only full version tags exist; there is no `v1`.
 
 License: GPL-3.0-or-later (libimagequant).

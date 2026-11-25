@@ -14,8 +14,14 @@ env:
 
 jobs:
   test:
+    # "ubuntu-latest", "macos-latest" and "windows-latest" are required status
+    # checks on main: the matrix keeps those names, but the jobs run on our own
+    # runners, never on GitHub-hosted ones.
     name: ${{ matrix.os }}
-    runs-on: ${{ startsWith(matrix.os, 'windows') && (vars.WINDOWS_RUNNER || 'beast-windows') || startsWith(matrix.os, 'macos') && (vars.MACOS_RUNNER || 'macbook') || startsWith(matrix.os, 'ubuntu') && endsWith(matrix.os, '-arm') && (vars.LINUX_ARM_RUNNER || 'linux-arm64') || startsWith(matrix.os, 'ubuntu') && (vars.LINUX_RUNNER || 'beast') || matrix.os }}
+    # Every job here runs on shared self-hosted runners: a pull request from a
+    # fork (outside code) runs none of them.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.os == 'macos-latest' && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +64,7 @@ jobs:
 
   msrv:
     name: MSRV
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
@@ -79,6 +86,7 @@ jobs:
 
   supply-chain:
     name: Supply Chain
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
@@ -105,6 +113,7 @@ jobs:
 
   coverage:
     name: Coverage
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7

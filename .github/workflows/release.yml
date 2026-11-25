@@ -10,7 +10,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref }}
@@ -22,21 +22,17 @@ env:
 jobs:
   build:
     name: ${{ matrix.target }}
-    runs-on: ${{ startsWith(matrix.os, 'windows') && (vars.WINDOWS_RUNNER || 'beast-windows') || startsWith(matrix.os, 'macos') && (vars.MACOS_RUNNER || 'macbook') || startsWith(matrix.os, 'ubuntu') && endsWith(matrix.os, '-arm') && (vars.LINUX_ARM_RUNNER || 'linux-arm64') || startsWith(matrix.os, 'ubuntu') && (vars.LINUX_RUNNER || 'beast') || matrix.os }}
+    # Our own runners only, and only for this repository's tags or a dispatch by a maintainer.
+    if: github.repository == 'newmatik/image-optimizer' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ${{ matrix.runner == 'windows' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.runner == 'macos' && (vars.MACOS_RUNNER || 'macbook') || matrix.runner == 'linux-arm' && vars.LINUX_ARM_RUNNER || (vars.LINUX_RUNNER || 'beast') }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+        # Both macOS targets build on the arm64 Mac runner: x86_64-apple-darwin is
+        # cross-compiled and its tests run on arm64 only (no Intel Mac runner).
+        # aarch64-unknown-linux-gnu needs an arm64 Linux runner: it is built only when
+        # the variable LINUX_ARM_RUNNER names one. Keep EXPECTED_PACKAGES in publish in step.
+        include: ${{ fromJSON(vars.LINUX_ARM_RUNNER && '[{"runner":"macos","target":"aarch64-apple-darwin"},{"runner":"macos","target":"x86_64-apple-darwin"},{"runner":"linux","target":"x86_64-unknown-linux-gnu"},{"runner":"linux-arm","target":"aarch64-unknown-linux-gnu"},{"runner":"windows","target":"x86_64-pc-windows-msvc"}]' || '[{"runner":"macos","target":"aarch64-apple-darwin"},{"runner":"macos","target":"x86_64-apple-darwin"},{"runner":"linux","target":"x86_64-unknown-linux-gnu"},{"runner":"windows","target":"x86_64-pc-windows-msvc"}]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -88,6 +84,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Tests the runner's own architecture (arm64 for both macOS targets).
       - name: Test
         run: cargo test --all-features
 
@@ -129,8 +126,21 @@ jobs:
   publish:
     name: Publish release
     needs: build
+    if: github.repository == 'newmatik/image-optimizer' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
+    # The only job that writes: it creates the release and uploads the packages.
+    permissions:
+      contents: write
+    env:
+      # One archive and one checksum per build target (see the build matrix).
+      EXPECTED_PACKAGES: ${{ vars.LINUX_ARM_RUNNER && '5' || '4' }}
     steps:
+      # The job has no checkout and Beast keeps its workspace between jobs: start
+      # from an empty dist so only this run's packages are counted and uploaded.
+      - name: Remove stale packages
+        shell: bash
+        run: rm -rf dist
+
       - name: Download packaged artifacts
         uses: actions/download-artifact@v8
         with:
@@ -138,7 +148,7 @@ jobs:
           merge-multiple: true
 
       # A rerun of only this job after the build artifacts expired downloads nothing:
-      # fail instead of publishing a release without binaries. Keep the 5 in step with the build matrix.
+      # fail instead of publishing a release without binaries.
       - name: Check all packages are present
         shell: bash
         run: |
@@ -146,8 +156,8 @@ jobs:
           mkdir -p dist
           archives=$(find dist -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)
           sums=$(find dist -maxdepth 1 -name '*.sha256' | wc -l)
-          if [ "$archives" -ne 5 ] || [ "$sums" -ne 5 ]; then
-            echo "::error::Expected 5 archives and 5 checksums, found $archives and $sums. Re-run all jobs."
+          if [ "$archives" -ne "$EXPECTED_PACKAGES" ] || [ "$sums" -ne "$EXPECTED_PACKAGES" ]; then
+            echo "::error::Expected $EXPECTED_PACKAGES archives and checksums, found $archives and $sums. Re-run all jobs."
             exit 1
           fi
 
