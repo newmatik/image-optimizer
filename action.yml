@@ -108,6 +108,18 @@ runs:
         # (gh release download refuses to overwrite an existing file).
         dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/imageopt.XXXXXX")"
         pattern="imageopt-*-${target}.${archive_ext}"
+
+        # Say why when the release has no binary for this runner, instead of
+        # gh's bare "no assets match the file pattern".
+        tag_arg=""; [ "$ver" != "latest" ] && tag_arg="$ver"
+        assets=$(gh release view $tag_arg --repo "$repo" --json assets --jq '.assets[].name')
+        if ! grep -q -- "-${target}\.${archive_ext}\$" <<< "$assets"; then
+          echo "::error::Release ${ver} of $repo has no $target binary."
+          if [ "$target" = aarch64-unknown-linux-gnu ]; then
+            echo "::error::Linux arm64 binaries are built only while an arm64 Linux runner exists. Pin version: v0.2.1 on Linux arm64 runners."
+          fi
+          exit 1
+        fi
         echo "Downloading $pattern from $repo ($ver)…"
         if [ "$ver" = "latest" ]; then
           gh release download --repo "$repo" --pattern "$pattern" --dir "$dir"

@@ -139,7 +139,8 @@ exec.
 
 Every job runs on our own runners (`vars.LINUX_RUNNER`, `vars.MACOS_RUNNER`,
 `vars.WINDOWS_RUNNER`), never GitHub-hosted ones, and pull requests from forks
-run no job. Both macOS targets build on the arm64 Mac: `x86_64-apple-darwin`
+run no job. Their required checks therefore never report, so a fork PR can't
+merge as is: a maintainer pushes its commits to a branch here to run CI. Both macOS targets build on the arm64 Mac: `x86_64-apple-darwin`
 is cross-compiled and not tested on an Intel Mac. `aarch64-unknown-linux-gnu`
 is built only while the variable `LINUX_ARM_RUNNER` names an arm64 Linux
 runner; without it a release has no Linux arm64 binary.

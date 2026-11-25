@@ -124,6 +124,12 @@ jobs:
           PY
           wc -c < smoke-assets/released.png > smoke-assets/before.txt
 
+      # The v0.2.1 wrapper downloads into a fixed folder; a runner that keeps
+      # $RUNNER_TEMP between jobs would make even the first use fail.
+      - name: Clear the v0.2.1 download folder before the first use
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/imageopt"
+
       - name: Optimize with the released action
         uses: newmatik/image-optimizer@v0.2.1
         with:

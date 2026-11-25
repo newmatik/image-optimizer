@@ -91,6 +91,19 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --bin imageopt
 
+      # The Intel binary is cross-compiled on the arm64 Mac: at least start it
+      # under Rosetta, when the Mac has it, before it ships.
+      - name: Smoke-test the Intel macOS binary
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 target/x86_64-apple-darwin/release/imageopt --version
+          else
+            echo "::warning::No Rosetta on this Mac: the x86_64-apple-darwin binary ships without running once."
+          fi
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
