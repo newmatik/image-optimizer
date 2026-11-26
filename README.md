@@ -24,7 +24,8 @@ cargo build --release
 Or install the CLI: `cargo install --path crates/cli`
 
 Prebuilt binaries: [Releases](https://github.com/newmatik/image-optimizer/releases)
-(macOS arm64/x64, Linux x64/arm64, Windows x64).
+(macOS arm64/x64, Linux x64, Windows x64; Linux arm64 up to v0.2.1 and
+again once we have an arm64 Linux build runner).
 
 ## Usage
 

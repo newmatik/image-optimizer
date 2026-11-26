@@ -108,14 +108,27 @@ runs:
         # (gh release download refuses to overwrite an existing file).
         dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/imageopt.XXXXXX")"
         pattern="imageopt-*-${target}.${archive_ext}"
-        echo "Downloading $pattern from $repo ($ver)…"
+
+        # Resolve "latest" to its tag once, so the check and the downloads see
+        # the same release.
         if [ "$ver" = "latest" ]; then
-          gh release download --repo "$repo" --pattern "$pattern" --dir "$dir"
-          gh release download --repo "$repo" --pattern "$pattern.sha256" --dir "$dir"
-        else
-          gh release download "$ver" --repo "$repo" --pattern "$pattern" --dir "$dir"
-          gh release download "$ver" --repo "$repo" --pattern "$pattern.sha256" --dir "$dir"
+          ver=$(gh release view --repo "$repo" --json tagName --jq .tagName)
         fi
+
+        # Say why when the release has no binary for this runner, instead of
+        # gh's bare "no assets match the file pattern".
+        assets=$(gh release view "$ver" --repo "$repo" --json assets --jq '.assets[].name')
+        if ! grep -q -- "^imageopt-.*-${target}\.${archive_ext}\$" <<< "$assets" \
+            || ! grep -q -- "^imageopt-.*-${target}\.${archive_ext}\.sha256\$" <<< "$assets"; then
+          echo "::error::Release ${ver} of $repo has no $target binary with its checksum."
+          if [ "$target" = aarch64-unknown-linux-gnu ]; then
+            echo "::error::Linux arm64 binaries are built only while an arm64 Linux runner exists. Pin version: v0.2.1 on Linux arm64 runners."
+          fi
+          exit 1
+        fi
+        echo "Downloading $pattern from $repo ($ver)…"
+        gh release download "$ver" --repo "$repo" --pattern "$pattern" --dir "$dir"
+        gh release download "$ver" --repo "$repo" --pattern "$pattern.sha256" --dir "$dir"
 
         # Compare the hash ourselves instead of `sha256sum -c`: the checksum
         # file of a Windows build has CRLF line ends, and the one of v0.2.1

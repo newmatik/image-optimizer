@@ -14,19 +14,19 @@ jobs:
     # "Composite action" is a required status check: the Linux job keeps
     # exactly that name.
     name: ${{ matrix.name }}
-    # The matrix values are only labels: Linux runs on Beast (LINUX_RUNNER), Windows on beast-windows
-    # (WINDOWS_RUNNER), macOS on the self-hosted Mac (MACOS_RUNNER). No GitHub-hosted runners (Actions budget $0).
-    runs-on: ${{ matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.os == 'macos-latest' && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
+    # Our own shared runners: a pull request from a fork (outside code) runs nothing.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ matrix.runner == 'windows' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.runner == 'macos' && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - runner: linux
             name: Composite action
-          - os: macos-latest
-            name: Composite action (macos-latest)
-          - os: windows-latest
-            name: Composite action (windows-latest)
+          - runner: macos
+            name: Composite action (macOS)
+          - runner: windows
+            name: Composite action (Windows)
     steps:
       - uses: actions/checkout@v7
         with:
@@ -88,12 +88,17 @@ jobs:
   # What users get: the action and the binary of the released tag, not the
   # wrapper of this branch. Bump the tag after every release.
   released:
-    name: Released action (${{ matrix.os }})
-    runs-on: ${{ matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.os == 'macos-latest' && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
+    name: Released action (${{ matrix.name }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ matrix.runner == 'windows' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.runner == 'macos' && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - runner: linux
+            name: Linux
+          - runner: macos
+            name: macOS
     steps:
       - name: Create a compressible PNG
         shell: bash
@@ -118,6 +123,12 @@ jobs:
           open("smoke-assets/released.png", "wb").write(png)
           PY
           wc -c < smoke-assets/released.png > smoke-assets/before.txt
+
+      # The v0.2.1 wrapper downloads into a fixed folder; a runner that keeps
+      # $RUNNER_TEMP between jobs would make even the first use fail.
+      - name: Clear the v0.2.1 download folder before the first use
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/imageopt"
 
       - name: Optimize with the released action
         uses: newmatik/image-optimizer@v0.2.1

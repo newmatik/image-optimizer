@@ -14,10 +14,13 @@ env:
 
 jobs:
   test:
+    # "ubuntu-latest", "macos-latest" and "windows-latest" are required status
+    # checks on main: the matrix keeps those names, but the jobs run on our own
+    # runners, never on GitHub-hosted ones.
     name: ${{ matrix.os }}
-    # The matrix values are only labels (they name the required checks): Linux runs on Beast (LINUX_RUNNER),
-    # Windows on beast-windows (WINDOWS_RUNNER), macOS on the self-hosted Mac (MACOS_RUNNER). No GitHub-hosted
-    # runners (Actions budget $0).
+    # Every job here runs on shared self-hosted runners: a pull request from a
+    # fork (outside code) runs none of them.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'beast-windows') || matrix.os == 'macos-latest' && (vars.MACOS_RUNNER || 'macbook') || (vars.LINUX_RUNNER || 'beast') }}
     strategy:
       fail-fast: false
@@ -60,6 +63,7 @@ jobs:
 
   msrv:
     name: MSRV
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
@@ -81,6 +85,7 @@ jobs:
 
   supply-chain:
     name: Supply Chain
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
@@ -107,6 +112,7 @@ jobs:
 
   coverage:
     name: Coverage
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ vars.LINUX_RUNNER || 'beast' }}
     steps:
       - uses: actions/checkout@v7
@@ -132,8 +138,11 @@ jobs:
         run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 
       - name: Upload coverage artifact
+        # A blocked artifact storage (newmatik/agent-skills#158) must not fail the job.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: lcov.info
           if-no-files-found: error
+          retention-days: 3
