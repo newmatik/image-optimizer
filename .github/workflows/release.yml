@@ -74,11 +74,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install nasm
 
+      # GitHub's Windows images ship Chocolatey; the self-hosted beast-windows VM does not.
       - name: Install nasm (Windows)
         if: runner.os == 'Windows'
-        run: |
-          choco install nasm -y
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
 
       - uses: Swatinem/rust-cache@v2
         with:
